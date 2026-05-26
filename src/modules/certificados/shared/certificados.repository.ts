@@ -345,16 +345,16 @@ export const emisionRepo = {
   async findAll(tenantSlug: string): Promise<CertificadoEntity[]> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
-      `SELECT c.*,
+      `SELECT c.*, prog.id AS programa_id,
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento, prog.nombre AS programa_nombre,
               g.nombre_grupo, ec.nombre AS estado_nombre
        FROM certificados c
-       JOIN inscripciones i    ON i.id  = c.inscripcion_id
-       JOIN participantes p    ON p.id  = i.participante_id
-       JOIN grupos_programas g ON g.id  = i.grupo_id
-       JOIN programas prog     ON prog.id = g.programa_id
-       JOIN estado_certificado ec ON ec.id = c.estado_id
+       JOIN inscripciones i       ON i.id   = c.inscripcion_id
+       JOIN participantes p       ON p.id   = i.participante_id
+       JOIN grupos_programas g    ON g.id   = i.grupo_id
+       JOIN programas prog        ON prog.id = g.programa_id
+       JOIN estado_certificado ec ON ec.id  = c.estado_id
        WHERE c.empresa_id = ?
        ORDER BY c.created_at DESC`,
       [empresaId],
@@ -369,21 +369,35 @@ export const emisionRepo = {
       'SELECT * FROM inscripciones WHERE id = ? AND empresa_id = ? AND estado_id = 3',
       [inscripcionId, empresaId],
     );
-    if (!insc.length) throw new Error('Inscripción no encontrada o el participante no está aprobado');
+    if (!(insc as any[]).length) throw new Error('Inscripción no encontrada o el participante no está aprobado');
 
     const [dup] = await pool().query<any[]>(
       'SELECT id FROM certificados WHERE inscripcion_id = ? AND estado_id != 2',
       [inscripcionId],
     );
-    if (dup.length) throw new Error('Ya existe un certificado vigente para esta inscripción');
+    if ((dup as any[]).length) throw new Error('Ya existe un certificado vigente para esta inscripción');
 
     const [result] = await pool().query<any>(
       `INSERT INTO certificados (empresa_id, inscripcion_id, codigo_unico, fecha_emision, estado_id, user_crea_id)
        VALUES (?, ?, ?, ?, 1, ?)`,
       [empresaId, inscripcionId, generarCodigo(empresaId), new Date().toISOString().split('T')[0], userId ?? null],
     );
-    const [rows] = await pool().query<any[]>('SELECT * FROM certificados WHERE id = ?', [result.insertId]);
-    return CertificadoEntity.fromRow(rows[0]);
+    // Retornar con todos los joins necesarios para el frontend
+    const [rows] = await pool().query<any[]>(
+      `SELECT c.*, prog.id AS programa_id,
+              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+              p.numero_documento, prog.nombre AS programa_nombre,
+              g.nombre_grupo, ec.nombre AS estado_nombre
+       FROM certificados c
+       JOIN inscripciones i       ON i.id   = c.inscripcion_id
+       JOIN participantes p       ON p.id   = i.participante_id
+       JOIN grupos_programas g    ON g.id   = i.grupo_id
+       JOIN programas prog        ON prog.id = g.programa_id
+       JOIN estado_certificado ec ON ec.id  = c.estado_id
+       WHERE c.id = ?`,
+      [result.insertId],
+    );
+    return CertificadoEntity.fromRow((rows as any[])[0]);
   },
 
   async validarPublico(codigoUnico: string): Promise<CertificadoPublicoEntity | null> {

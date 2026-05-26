@@ -2,6 +2,7 @@ export class CertificadoEntity {
   id!: number;
   empresa_id!: number;
   inscripcion_id!: number;
+  programa_id?: number;
   participante_nombre?: string;
   numero_documento?: string;
   programa_nombre?: string;

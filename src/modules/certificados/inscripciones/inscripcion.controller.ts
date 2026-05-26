@@ -9,10 +9,11 @@ export async function listInscripciones(req: Request, res: Response): Promise<vo
 
 export async function createInscripcion(req: Request, res: Response): Promise<void> {
   const { participante_id, grupo_id, fecha_inscripcion } = req.body ?? {};
-  if (!participante_id || !grupo_id || !fecha_inscripcion) {
-    res.status(400).json({ error: 'participante_id, grupo_id y fecha_inscripcion son requeridos' }); return;
+  if (!participante_id || !grupo_id) {
+    res.status(400).json({ error: 'participante_id y grupo_id son requeridos' }); return;
   }
-  res.status(201).json(await inscripcionService.create(tid(req), { participante_id, grupo_id, fecha_inscripcion }));
+  const fecha = fecha_inscripcion ?? new Date().toISOString().split('T')[0];
+  res.status(201).json(await inscripcionService.create(tid(req), { participante_id, grupo_id, fecha_inscripcion: fecha }));
 }
 
 export async function cambiarEstado(req: Request, res: Response): Promise<void> {
