@@ -1,8 +1,6 @@
 import type { Request, Response } from 'express';
 import { participanteService } from './participante.service';
-import type { RequestWithTenant } from '../../../middleware/tenant.middleware';
-
-const tid = (req: Request) => (req as unknown as RequestWithTenant).tenant.id;
+import { tid } from '../shared/router.helper';
 
 export async function listParticipantes(req: Request, res: Response): Promise<void> {
   res.json(await participanteService.listAll(tid(req)));

@@ -1,8 +1,6 @@
 import type { Request, Response } from 'express';
 import { inscripcionService } from './inscripcion.service';
-import type { RequestWithTenant } from '../../../middleware/tenant.middleware';
-
-const tid = (req: Request) => (req as unknown as RequestWithTenant).tenant.id;
+import { tid } from '../shared/router.helper';
 
 export async function listInscripciones(req: Request, res: Response): Promise<void> {
   const grupoId = req.query.grupo_id ? Number(req.query.grupo_id) : undefined;

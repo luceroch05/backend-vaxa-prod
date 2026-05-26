@@ -1,8 +1,8 @@
-import { findAll, findById, create } from './grupo.repository';
+import { gruposRepo } from '../shared/certificados.repository';
 import type { CreateGrupoDto } from './grupo.dto';
 
 export const grupoService = {
-  listAll:  (tenantSlug: string)                                    => findAll(tenantSlug),
-  findById: (tenantSlug: string, id: number)                        => findById(tenantSlug, id),
-  create:   (tenantSlug: string, dto: CreateGrupoDto, uid?: number) => create(tenantSlug, dto, uid),
+  listAll:  (tenantSlug: string)                                       => gruposRepo.findAll(tenantSlug),
+  findById: (tenantSlug: string, id: number)                           => gruposRepo.findById(tenantSlug, id),
+  create:   (tenantSlug: string, dto: CreateGrupoDto, uid?: number)    => gruposRepo.create(tenantSlug, dto, uid),
 };

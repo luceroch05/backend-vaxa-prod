@@ -1,5 +1,5 @@
-import { findAll } from './catalogo.repository';
+import { catalogosRepo } from '../shared/certificados.repository';
 
 export const catalogoService = {
-  getCatalogos: () => findAll(),
+  getCatalogos: () => catalogosRepo.findAll(),
 };
