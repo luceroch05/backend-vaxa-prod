@@ -3,13 +3,47 @@ import { configService } from './config.service';
 import { tid } from '../shared/router.helper';
 
 export async function getConfig(req: Request, res: Response): Promise<void> {
-  const cfg = await configService.findByPrograma(tid(req), Number(req.params.programaId));
+  const grupoId = req.query.grupo_id ? Number(req.query.grupo_id) : 0;
+  const cfg = await configService.findByPrograma(tid(req), Number(req.params.programaId), grupoId);
   if (!cfg) { res.status(404).json({ error: 'Configuración no encontrada' }); return; }
   res.json(cfg);
 }
 
 export async function upsertConfig(req: Request, res: Response): Promise<void> {
-  const { plantilla_url, firma_1_id, firma_2_id, logo_id } = req.body ?? {};
-  if (!plantilla_url) { res.status(400).json({ error: 'plantilla_url es requerido' }); return; }
-  res.json(await configService.upsert(tid(req), Number(req.params.programaId), { plantilla_url, firma_1_id, firma_2_id, logo_id }));
+  const { plantilla_url, texto_personalizado, logo_ids, firma_ids, grupo_id } = req.body ?? {};
+  res.json(await configService.upsert(tid(req), Number(req.params.programaId), {
+    plantilla_url:      plantilla_url || null,
+    texto_personalizado: texto_personalizado || null,
+    grupo_id:           grupo_id ?? 0,
+    logo_ids:  Array.isArray(logo_ids)  ? logo_ids  : [],
+    firma_ids: Array.isArray(firma_ids) ? firma_ids : [],
+  }));
+}
+
+/** Devuelve la lista de grupo_ids que tienen config propia para ese programa */
+export async function listGruposConConfig(req: Request, res: Response): Promise<void> {
+  const grupos = await configService.listGruposConConfig(tid(req), Number(req.params.programaId));
+  res.json({ grupos });
+}
+
+/** Congela la config actual del programa para un grupo específico */
+export async function congelarGrupo(req: Request, res: Response): Promise<void> {
+  const cfg = await configService.congelarGrupo(
+    tid(req),
+    Number(req.params.programaId),
+    Number(req.params.grupoId),
+  );
+  if (!cfg) { res.status(404).json({ error: 'Programa sin configuración base' }); return; }
+  res.json(cfg);
+}
+
+/** Elimina la config específica del grupo (vuelve a heredar del programa) */
+export async function eliminarConfigGrupo(req: Request, res: Response): Promise<void> {
+  const ok = await configService.eliminarConfigGrupo(
+    tid(req),
+    Number(req.params.programaId),
+    Number(req.params.grupoId),
+  );
+  if (!ok) { res.status(404).json({ error: 'Configuración del grupo no encontrada' }); return; }
+  res.status(204).send();
 }

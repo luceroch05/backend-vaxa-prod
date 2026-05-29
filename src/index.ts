@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import * as path from 'path';
 import express from 'express';
 import cors from 'cors';
 import { tenantMiddleware } from './middleware/tenant.middleware';
@@ -15,13 +16,16 @@ const app = express();
 
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS ?? 'http://localhost:5173').split(',');
 app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 
 const BASE_PATH = (process.env.BASE_PATH ?? '').replace(/\/$/, '');
 
 app.get(`${BASE_PATH}/health`, (_req, res) => {
   res.json({ ok: true, service: 'vaxa-back', timestamp: new Date().toISOString() });
 });
+
+/** Servir PDFs y archivos subidos estáticamente */
+app.use(`${BASE_PATH}/uploads`, express.static(path.join(process.cwd(), 'uploads')));
 
 /** Auth — sin tenant middleware (login es público) */
 app.use(`${BASE_PATH}/api/auth`, authRoutes);

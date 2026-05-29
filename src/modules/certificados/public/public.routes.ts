@@ -55,6 +55,25 @@ router.get('/:tenantSlug/grupos', async (req: Request, res: Response) => {
  * Registro público de alumno: crea/recupera participante e inscripción.
  * No requiere JWT — es el endpoint que usa el formulario público.
  */
+router.get('/:tenantSlug/participante', async (req: Request, res: Response) => {
+  try {
+    const documento = (req.query.documento as string)?.trim();
+    if (!documento) { res.status(400).json({ error: 'documento es requerido' }); return; }
+    const empresaId = await getEmpresaId(req.params.tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT tipo_documento_id, numero_documento, nombres, apellidos, email, telefono
+       FROM participantes
+       WHERE empresa_id = ? AND numero_documento = ? AND activo = 1
+       LIMIT 1`,
+      [empresaId, documento],
+    );
+    if (!(rows as any[]).length) { res.status(404).json({ error: 'No registrado' }); return; }
+    res.json((rows as any[])[0]);
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
 router.post('/:tenantSlug/registro', async (req: Request, res: Response) => {
   const { tipo_documento_id, numero_documento, nombres, apellidos, email, telefono, grupo_id } = req.body ?? {};
 
@@ -97,13 +116,19 @@ router.post('/:tenantSlug/registro', async (req: Request, res: Response) => {
       participanteId = result.insertId;
     }
 
-    // Verificar inscripción duplicada en el mismo grupo
+    // Verificar inscripción duplicada en el mismo PROGRAMA (cualquier grupo, no rechazada)
     const [inscExistente] = await db.execute<any[]>(
-      'SELECT id FROM inscripciones WHERE empresa_id = ? AND participante_id = ? AND grupo_id = ?',
-      [empresaId, participanteId, grupo_id]
+      `SELECT g2.nombre_grupo
+       FROM grupos_programas g
+       JOIN grupos_programas g2 ON g2.programa_id = g.programa_id
+       JOIN inscripciones i     ON i.grupo_id = g2.id
+       WHERE g.id = ? AND i.empresa_id = ? AND i.participante_id = ? AND i.estado_id <> 6
+       LIMIT 1`,
+      [grupo_id, empresaId, participanteId]
     );
     if ((inscExistente as any[]).length > 0) {
-      res.status(409).json({ error: 'Ya estás inscrito en este grupo' });
+      const g = (inscExistente as any[])[0].nombre_grupo;
+      res.status(409).json({ error: `Ya estás inscrito en este programa (grupo "${g}").` });
       return;
     }
 

@@ -1,20 +1,36 @@
+export interface ConfigLogoItem {
+  id:          number;
+  imagen_logo: string;
+  nombre:      string | null;
+  orden:       number;
+}
+
+export interface ConfigFirmaItem {
+  id:               number;
+  nombre_autoridad: string;
+  cargo:            string;
+  imagen_firma:     string;
+  orden:            number;
+}
+
 export class ConfigCertificadoEntity {
-  id!: number;
-  empresa_id!: number;
-  programa_id!: number;
-  plantilla_url!: string;
-  firma_1_id?: number;
-  firma1_autoridad?: string;
-  firma1_cargo?: string;
-  firma1_imagen?: string;
-  firma_2_id?: number;
-  firma2_autoridad?: string;
-  firma2_cargo?: string;
-  firma2_imagen?: string;
-  logo_id?: number;
-  imagen_logo?: string;
-  logo_nombre?: string;
-  activo!: boolean;
-  created_at!: string;
-  static fromRow(row: any) { return Object.assign(new ConfigCertificadoEntity(), row); }
+  id!:           number;
+  empresa_id!:   number;
+  programa_id!:  number;
+  plantilla_url!: string | null;
+  activo!:       boolean;
+  created_at!:   string;
+  logos:  ConfigLogoItem[]  = [];
+  firmas: ConfigFirmaItem[] = [];
+
+  static fromRow(
+    row: any,
+    logos:  ConfigLogoItem[]  = [],
+    firmas: ConfigFirmaItem[] = [],
+  ): ConfigCertificadoEntity {
+    const e = Object.assign(new ConfigCertificadoEntity(), row);
+    e.logos  = logos;
+    e.firmas = firmas;
+    return e;
+  }
 }

@@ -16,6 +16,18 @@ export async function createInscripcion(req: Request, res: Response): Promise<vo
   res.status(201).json(await inscripcionService.create(tid(req), { participante_id, grupo_id, fecha_inscripcion: fecha }));
 }
 
+export async function inscribir(req: Request, res: Response): Promise<void> {
+  const { tipo_documento_id, numero_documento, nombres, apellidos, email, telefono, grupo_id, fecha_inscripcion } = req.body ?? {};
+  if (!tipo_documento_id || !numero_documento?.trim() || !nombres?.trim() || !apellidos?.trim() || !grupo_id) {
+    res.status(400).json({ error: 'tipo_documento_id, numero_documento, nombres, apellidos y grupo_id son requeridos' }); return;
+  }
+  res.status(201).json(await inscripcionService.inscribir(tid(req), {
+    tipo_documento_id, numero_documento: numero_documento.trim(),
+    nombres: nombres.trim(), apellidos: apellidos.trim(),
+    email, telefono, grupo_id, fecha_inscripcion,
+  }));
+}
+
 export async function cambiarEstado(req: Request, res: Response): Promise<void> {
   const { estado_id } = req.body ?? {};
   if (!estado_id) { res.status(400).json({ error: 'estado_id es requerido' }); return; }

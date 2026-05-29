@@ -5,4 +5,5 @@ export const emisionService = {
   generar:       (tenantSlug: string, inscripcionId: number, uid?: number) => emisionRepo.generar(tenantSlug, inscripcionId, uid),
   validarPublico:(codigoUnico: string)                                      => emisionRepo.validarPublico(codigoUnico),
   anular:        (tenantSlug: string, id: number, uid?: number)            => emisionRepo.anular(tenantSlug, id, uid),
+  regenerarPDF:  (tenantSlug: string, id: number)                          => emisionRepo.regenerarPDF(tenantSlug, id),
 };

@@ -6,6 +6,8 @@ export class ProgramaEntity {
   nombre!: string;
   descripcion?: string;
   horas_academicas!: number;
+  unidad_label!: string;
+  nota_minima!: number;
   activo!: boolean;
   created_at!: string;
   updated_at?: string;

@@ -21,3 +21,9 @@ export async function anularCertificado(req: Request, res: Response): Promise<vo
   if (!ok) { res.status(404).json({ error: 'Certificado no encontrado' }); return; }
   res.status(204).send();
 }
+
+export async function regenerarPDF(req: Request, res: Response): Promise<void> {
+  const url = await emisionService.regenerarPDF(tid(req), Number(req.params.id));
+  if (!url) { res.status(404).json({ error: 'Certificado no encontrado' }); return; }
+  res.json({ url: `/${url}` });
+}

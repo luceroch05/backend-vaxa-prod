@@ -6,7 +6,12 @@ export class CertificadoEntity {
   participante_nombre?: string;
   numero_documento?: string;
   programa_nombre?: string;
+  tipo_programa_nombre?: string;
+  horas_academicas?: number;
   nombre_grupo?: string;
+  fecha_inicio?: string;
+  fecha_fin?: string;
+  modalidad_nombre?: string;
   codigo_unico!: string;
   url?: string;
   fecha_emision!: string;
