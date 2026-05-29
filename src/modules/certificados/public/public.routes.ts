@@ -7,6 +7,24 @@ import { catalogosRepo } from '../shared/certificados.repository';
 const router = Router({ mergeParams: true });
 
 /**
+ * GET /public/certificados/:tenantSlug/existe
+ * Indica si el tenant_slug corresponde a una empresa activa.
+ * Lo usa el frontend para no mostrar el login/plataforma de una empresa inexistente.
+ */
+router.get('/:tenantSlug/existe', async (req: Request, res: Response) => {
+  try {
+    const slug = req.params.tenantSlug?.toLowerCase().trim();
+    const [rows] = await pool().query<any[]>(
+      'SELECT id FROM empresas WHERE tenant_slug = ? AND activo = 1 LIMIT 1',
+      [slug],
+    );
+    res.json({ exists: (rows as any[]).length > 0 });
+  } catch (e: unknown) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
+/**
  * GET /public/certificados/:tenantSlug/catalogos
  * Catálogos para el formulario público (sin JWT)
  */

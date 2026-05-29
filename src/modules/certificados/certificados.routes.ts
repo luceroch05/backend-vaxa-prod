@@ -9,9 +9,10 @@ import { listInscripciones, createInscripcion, cambiarEstado, inscribir } from '
 import { listLogos, createLogo, deleteLogo }                         from './logos/logo.controller';
 import { listFirmas, createFirma, deleteFirma }                      from './firmas/firma.controller';
 import { getConfig, upsertConfig, listGruposConConfig, congelarGrupo, eliminarConfigGrupo } from './config/config.controller';
-import { listCertificados, generarCertificado, anularCertificado, regenerarPDF } from './emision/emision.controller';
+import { listCertificados, generarCertificado, anularCertificado, eliminarCertificado, regenerarPDF } from './emision/emision.controller';
 import { listUnidades, createUnidad, updateUnidad, deleteUnidad } from './unidades/unidad.controller';
 import { getNotasGrupo, guardarNotas } from './notas/nota.controller';
+import { getCreditos, getMovimientos } from './creditos/credito.controller';
 
 const router = Router();
 
@@ -73,6 +74,11 @@ router.put('/notas/inscripcion/:inscripcionId', w(guardarNotas));           // g
 router.get('/emision',                          w(listCertificados));
 router.post('/emision/generar/:inscripcionId',  w(generarCertificado));
 router.patch('/emision/:id/anular',             w(anularCertificado));
+router.delete('/emision/:id',                   w(eliminarCertificado));     // elimina y DEVUELVE crédito
 router.post('/emision/:id/regenerar-pdf',       w(regenerarPDF));
+
+// Creditos (saldo de la propia empresa)
+router.get('/creditos',                         w(getCreditos));
+router.get('/creditos/movimientos',             w(getMovimientos));
 
 export const certificadosRoutes = router;

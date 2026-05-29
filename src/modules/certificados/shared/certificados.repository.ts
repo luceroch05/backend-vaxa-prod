@@ -1,5 +1,7 @@
 import * as path from 'path';
+import * as fs from 'fs';
 import { pool, getEmpresaId } from './db.helper';
+import { creditosRepo } from './creditos.repository';
 import { pdfService } from '../pdf/pdf.service';
 
 import { TipoDocumentoEntity, TipoProgramaEntity, ModalidadEntity } from '../catalogos/catalogo.entity';
@@ -819,12 +821,28 @@ export const emisionRepo = {
     }
 
     const codigo = generarCodigo(empresaId);
-    const [result] = await pool().query<any>(
-      `INSERT INTO certificados (empresa_id, inscripcion_id, codigo_unico, fecha_emision, estado_id, user_crea_id)
-       VALUES (?, ?, ?, ?, 1, ?)`,
-      [empresaId, inscripcionId, codigo, new Date().toISOString().split('T')[0], userId ?? null],
-    );
-    const certId = result.insertId;
+
+    // Transacción: insertar el certificado y descontar 1 crédito de forma atómica.
+    // `consumir` bloquea la fila de la empresa (FOR UPDATE) y lanza SinCreditosError
+    // si el saldo es 0; en ese caso el rollback deshace el INSERT del certificado.
+    const conn = await pool().getConnection();
+    let certId: number;
+    try {
+      await conn.beginTransaction();
+      const [result] = await conn.query<any>(
+        `INSERT INTO certificados (empresa_id, inscripcion_id, codigo_unico, fecha_emision, estado_id, user_crea_id)
+         VALUES (?, ?, ?, ?, 1, ?)`,
+        [empresaId, inscripcionId, codigo, new Date().toISOString().split('T')[0], userId ?? null],
+      );
+      certId = result.insertId;
+      await creditosRepo.consumir(conn, empresaId, certId, userId);
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
 
     // Recuperar todos los datos del certificado recién creado
     const [rows] = await pool().query<any[]>(
@@ -919,6 +937,41 @@ export const emisionRepo = {
       [userId ?? null, id, empresaId],
     );
     return r.affectedRows > 0;
+  },
+
+  /**
+   * Elimina el certificado por completo y DEVUELVE 1 crédito al saldo.
+   * (Anular solo desactiva; eliminar libera el cupo). Borra también el PDF físico.
+   */
+  async eliminar(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      // Recuperar la URL del PDF antes de borrar, para limpiar el archivo después.
+      const [rows] = await conn.query<any[]>(
+        'SELECT url FROM certificados WHERE id = ? AND empresa_id = ? FOR UPDATE',
+        [id, empresaId],
+      );
+      if (!(rows as any[]).length) { await conn.rollback(); return false; }
+      const urlRel: string | null = (rows as any[])[0].url ?? null;
+
+      await conn.query('DELETE FROM certificados WHERE id = ? AND empresa_id = ?', [id, empresaId]);
+      await creditosRepo.devolver(conn, empresaId, id, userId);
+      await conn.commit();
+
+      // Borrar el PDF del disco (fuera de la transacción; si falla no afecta el saldo).
+      if (urlRel) {
+        const abs = path.join(process.cwd(), urlRel.replace(/^\/+/, ''));
+        fs.promises.unlink(abs).catch(() => { /* archivo ya no existe, ignorar */ });
+      }
+      return true;
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
   },
 };
 

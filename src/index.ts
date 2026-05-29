@@ -4,6 +4,10 @@ import express from 'express';
 import cors from 'cors';
 import { tenantMiddleware } from './middleware/tenant.middleware';
 import { jwtMiddleware } from './middleware/jwt.middleware';
+import { tenantMatchMiddleware } from './middleware/tenant-match.middleware';
+import { requireRootTenant } from './middleware/require-root-tenant.middleware';
+import { creditosAdminRoutes } from './modules/admin/creditos.admin.routes';
+import { adminRoutes } from './modules/admin/admin.routes';
 import { authRoutes } from './modules/auth/auth.routes';
 import { backofficeRoutes } from './modules/backoffice/backoffice.routes';
 import { pacientesRoutes } from './modules/pacientes/pacientes.routes';
@@ -36,8 +40,12 @@ app.get(`${BASE_PATH}/public/certificado/:codigo`,
   (req, res) => validarPublico(req as any, res).catch((e: Error) => res.status(500).json({ error: e.message })),
 );
 
-/** Certificados: JWT + x-tenant-id, sin tenant middleware de config */
-app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, certificadosRoutes);
+/** Certificados: JWT + verificación de que el tenant del token == x-tenant-id */
+app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, certificadosRoutes);
+
+/** Administración Vaxa: JWT + solo tenant raíz (créditos, empresas y usuarios de todas las empresas) */
+app.use(`${BASE_PATH}/api/admin/creditos`, jwtMiddleware, requireRootTenant, creditosAdminRoutes);
+app.use(`${BASE_PATH}/api/admin`,          jwtMiddleware, requireRootTenant, adminRoutes);
 
 /** Rutas antiguas: tenant middleware solo para las rutas que lo necesitan */
 app.use(`${BASE_PATH}/api/backoffice`, tenantMiddleware, backofficeRoutes);
