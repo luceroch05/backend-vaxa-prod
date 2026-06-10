@@ -15,10 +15,15 @@ router.get('/:tenantSlug/existe', async (req: Request, res: Response) => {
   try {
     const slug = req.params.tenantSlug?.toLowerCase().trim();
     const [rows] = await pool().query<any[]>(
-      'SELECT id FROM empresas WHERE tenant_slug = ? AND activo = 1 LIMIT 1',
+      'SELECT id, razon_social, logo_url FROM empresas WHERE tenant_slug = ? AND activo = 1 LIMIT 1',
       [slug],
     );
-    res.json({ exists: (rows as any[]).length > 0 });
+    const e = (rows as any[])[0];
+    res.json({
+      exists: !!e,
+      razon_social: e?.razon_social ?? null,
+      logo_url: e?.logo_url ?? null,
+    });
   } catch (e: unknown) {
     res.status(500).json({ error: (e as Error).message });
   }

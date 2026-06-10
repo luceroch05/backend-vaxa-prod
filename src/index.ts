@@ -1,4 +1,6 @@
-import 'dotenv/config';
+// En local carga el .env; en producción las env vars las inyecta Passenger
+// (SetEnv en .htaccess), así que si dotenv no está instalado, no debe romper.
+try { require('dotenv').config(); } catch { /* dotenv ausente en prod: ok */ }
 import * as path from 'path';
 import express from 'express';
 import cors from 'cors';
@@ -51,6 +53,23 @@ app.use(`${BASE_PATH}/api/admin`,          jwtMiddleware, requireRootTenant, adm
 app.use(`${BASE_PATH}/api/backoffice`, tenantMiddleware, backofficeRoutes);
 app.use(`${BASE_PATH}/api/dashboard`,  tenantMiddleware, dashboardRoutes);
 app.use(`${BASE_PATH}/api/pacientes`,  tenantMiddleware, pacientesRoutes);
+
+/** ───────────────────────────────────────────────────────────
+ *  Frontend (build de Vite). En producción Passenger monta la app
+ *  en "/", así que Express también sirve el frontend estático.
+ *  Subir el contenido del dist/ del frontend a: <appRoot>/frontend
+ *  (en el server: /home/vaxasysc/vaxa-api/frontend)
+ *  ─────────────────────────────────────────────────────────── */
+const FRONTEND_DIR = path.join(process.cwd(), 'frontend');
+app.use(express.static(FRONTEND_DIR));
+
+/** SPA fallback: GET que no sea API/public/uploads/health → index.html */
+const NON_SPA = [`${BASE_PATH}/api`, `${BASE_PATH}/public`, `${BASE_PATH}/uploads`, `${BASE_PATH}/health`];
+app.use((req, res, next) => {
+  if (req.method !== 'GET') return next();
+  if (NON_SPA.some((p) => req.path.startsWith(p))) return next();
+  res.sendFile(path.join(FRONTEND_DIR, 'index.html'), (err) => { if (err) next(); });
+});
 
 app.use((_req, res) => {
   res.status(404).json({ error: 'Not Found', service: 'vaxa-back' });
