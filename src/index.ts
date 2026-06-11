@@ -20,8 +20,27 @@ import { validarPublico } from './modules/certificados/emision/emision.controlle
 
 const app = express();
 
-const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS ?? 'http://localhost:5173').split(',');
-app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS ?? 'http://localhost:5173')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+// En desarrollo permitimos cualquier puerto de localhost (5173, 5174, etc.) para
+// no romper por el puerto que Vite elija. En producción solo los orígenes de CORS_ORIGINS.
+const IS_PROD = process.env.NODE_ENV === 'production';
+
+app.use(cors({
+  credentials: true,
+  origin(origin, callback) {
+    // Sin Origin (curl, apps móviles, same-origin) → permitir.
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    if (!IS_PROD && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`Origen no permitido por CORS: ${origin}`));
+  },
+}));
 app.use(express.json({ limit: '15mb' }));
 
 const BASE_PATH = (process.env.BASE_PATH ?? '').replace(/\/$/, '');
