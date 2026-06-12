@@ -371,9 +371,11 @@ export const gruposRepo = {
   async create(tenantSlug: string, dto: CreateGrupoDto, userId?: number): Promise<GrupoEntity> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [result] = await pool().query<any>(
-      `INSERT INTO grupos_programas (empresa_id, programa_id, nombre_grupo, fecha_inicio, fecha_fin, modalidad_id, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [empresaId, dto.programa_id, dto.nombre_grupo, dto.fecha_inicio, dto.fecha_fin, dto.modalidad_id, userId ?? null],
+      `INSERT INTO grupos_programas (empresa_id, programa_id, nombre_grupo, fecha_inicio, fecha_fin, dias_semana, hora_inicio, hora_fin, modalidad_id, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, dto.programa_id, dto.nombre_grupo, dto.fecha_inicio, dto.fecha_fin,
+       dto.dias_semana ?? null, dto.hora_inicio ?? null, dto.hora_fin ?? null,
+       dto.modalidad_id, userId ?? null],
     );
     return (await gruposRepo.findById(tenantSlug, result.insertId))!;
   },
@@ -435,19 +437,19 @@ export const participantesRepo = {
 };
 
 /** ¿El participante ya tiene una inscripción (no rechazada) en el MISMO programa del grupo dado? */
-async function inscripcionDuplicadaEnPrograma(
+async function inscripcionDuplicadaEnGrupo(
   empresaId: number, participanteId: number, grupoId: number,
-): Promise<{ nombre_grupo: string } | null> {
+): Promise<boolean> {
+  // Solo bloquea si ya está inscrito EN ESE MISMO grupo (no rechazada).
+  // Se permite reinscribirse al mismo programa en OTRO grupo.
   const [rows] = await pool().query<any[]>(
-    `SELECT g2.nombre_grupo
-     FROM grupos_programas g
-     JOIN grupos_programas g2 ON g2.programa_id = g.programa_id
-     JOIN inscripciones i     ON i.grupo_id = g2.id
-     WHERE g.id = ? AND i.participante_id = ? AND i.empresa_id = ? AND i.estado_id <> 6
+    `SELECT i.id
+     FROM inscripciones i
+     WHERE i.grupo_id = ? AND i.participante_id = ? AND i.empresa_id = ? AND i.estado_id <> 6
      LIMIT 1`,
     [grupoId, participanteId, empresaId],
   );
-  return (rows as any[])[0] ?? null;
+  return (rows as any[]).length > 0;
 }
 
 // ============================================================
@@ -475,9 +477,9 @@ export const inscripcionesRepo = {
   async create(tenantSlug: string, dto: CreateInscripcionDto, userId?: number): Promise<InscripcionEntity> {
     const empresaId = await getEmpresaId(tenantSlug);
 
-    // Evitar doble inscripción en el mismo programa.
-    const dup = await inscripcionDuplicadaEnPrograma(empresaId, dto.participante_id, dto.grupo_id);
-    if (dup) throw new Error(`El estudiante ya está inscrito en este programa (grupo "${dup.nombre_grupo}").`);
+    // Evitar doble inscripción en el MISMO grupo (sí se permite otro grupo del mismo programa).
+    const dup = await inscripcionDuplicadaEnGrupo(empresaId, dto.participante_id, dto.grupo_id);
+    if (dup) throw new Error('El estudiante ya está inscrito en este grupo.');
 
     const [result] = await pool().query<any>(
       `INSERT INTO inscripciones (empresa_id, participante_id, grupo_id, estado_id, fecha_inscripcion, user_crea_id)

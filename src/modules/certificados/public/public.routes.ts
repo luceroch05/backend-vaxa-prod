@@ -3,8 +3,27 @@ import type { Request, Response } from 'express';
 import { getPool } from '../../../db/pool';
 import { pool, getEmpresaId } from '../shared/db.helper';
 import { catalogosRepo } from '../shared/certificados.repository';
+import { rateLimit } from '../../../middleware/rate-limit.middleware';
 
 const router = Router({ mergeParams: true });
+
+/** Límite estricto SOLO para la búsqueda por documento: es el vector de scraping
+ *  de datos personales (iterar DNIs). 20 búsquedas/min por IP son de sobra para
+ *  un alumno real y cortan la enumeración masiva. */
+const participanteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  message: 'Demasiadas búsquedas. Espera un momento antes de reintentar.',
+});
+
+/**
+ * Enmascara datos de contacto para que el dueño real se reconozca ("¿eres tú?")
+ * pero un scraper que itera documentos no obtenga PII utilizable.
+ */
+const maskEmail = (e?: string | null): string | null =>
+  e ? e.replace(/^(.).*?(@.*)$/, '$1***$2') : null;
+const maskTel = (t?: string | null): string | null =>
+  t ? t.replace(/.(?=.{2})/g, '*') : null;
 
 /**
  * GET /public/certificados/:tenantSlug/existe
@@ -55,6 +74,7 @@ router.get('/:tenantSlug/grupos', async (req: Request, res: Response) => {
     const empresaId = await getEmpresaId(req.params.tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT g.id, g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
+              g.dias_semana, g.hora_inicio, g.hora_fin,
               g.modalidad_id, m.nombre AS modalidad_nombre,
               g.programa_id, p.nombre AS programa_nombre,
               p.horas_academicas, p.descripcion AS programa_descripcion,
@@ -78,7 +98,7 @@ router.get('/:tenantSlug/grupos', async (req: Request, res: Response) => {
  * Registro público de alumno: crea/recupera participante e inscripción.
  * No requiere JWT — es el endpoint que usa el formulario público.
  */
-router.get('/:tenantSlug/participante', async (req: Request, res: Response) => {
+router.get('/:tenantSlug/participante', participanteLimiter, async (req: Request, res: Response) => {
   try {
     const documento = (req.query.documento as string)?.trim();
     if (!documento) { res.status(400).json({ error: 'documento es requerido' }); return; }
@@ -91,14 +111,24 @@ router.get('/:tenantSlug/participante', async (req: Request, res: Response) => {
       [empresaId, documento],
     );
     if (!(rows as any[]).length) { res.status(404).json({ error: 'No registrado' }); return; }
-    res.json((rows as any[])[0]);
+    const p = (rows as any[])[0];
+    // Devolvemos contacto enmascarado: el alumno se reconoce, pero un scraper
+    // que enumera documentos no obtiene email/teléfono reales.
+    res.json({
+      tipo_documento_id: p.tipo_documento_id,
+      numero_documento:  p.numero_documento,
+      nombres:           p.nombres,
+      apellidos:         p.apellidos,
+      email:             maskEmail(p.email),
+      telefono:          maskTel(p.telefono),
+    });
   } catch (e: unknown) {
     res.status(500).json({ error: (e as Error).message });
   }
 });
 
 router.post('/:tenantSlug/registro', async (req: Request, res: Response) => {
-  const { tipo_documento_id, numero_documento, nombres, apellidos, email, telefono, grupo_id } = req.body ?? {};
+  const { tipo_documento_id, numero_documento, nombres, apellidos, email, telefono, telefono_pais, grupo_id } = req.body ?? {};
 
   if (!tipo_documento_id || !numero_documento || !nombres || !apellidos || !grupo_id) {
     res.status(400).json({ error: 'tipo_documento_id, numero_documento, nombres, apellidos y grupo_id son requeridos' });
@@ -132,26 +162,24 @@ router.post('/:tenantSlug/registro', async (req: Request, res: Response) => {
       participanteId = (existentes as any[])[0].id;
     } else {
       const [result] = await db.execute<any>(
-        `INSERT INTO participantes (empresa_id, tipo_documento_id, numero_documento, nombres, apellidos, email, telefono)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [empresaId, tipo_documento_id, numero_documento.trim(), nombres.trim(), apellidos.trim(), email || null, telefono || null]
+        `INSERT INTO participantes (empresa_id, tipo_documento_id, numero_documento, nombres, apellidos, email, telefono, telefono_pais)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, tipo_documento_id, numero_documento.trim(), nombres.trim(), apellidos.trim(), email || null, telefono || null, telefono_pais || null]
       );
       participanteId = result.insertId;
     }
 
-    // Verificar inscripción duplicada en el mismo PROGRAMA (cualquier grupo, no rechazada)
+    // Verificar inscripción duplicada SOLO en este mismo grupo (no rechazada).
+    // Sí se permite reinscribirse al mismo programa en OTRO grupo.
     const [inscExistente] = await db.execute<any[]>(
-      `SELECT g2.nombre_grupo
-       FROM grupos_programas g
-       JOIN grupos_programas g2 ON g2.programa_id = g.programa_id
-       JOIN inscripciones i     ON i.grupo_id = g2.id
-       WHERE g.id = ? AND i.empresa_id = ? AND i.participante_id = ? AND i.estado_id <> 6
+      `SELECT i.id
+       FROM inscripciones i
+       WHERE i.empresa_id = ? AND i.participante_id = ? AND i.grupo_id = ? AND i.estado_id <> 6
        LIMIT 1`,
-      [grupo_id, empresaId, participanteId]
+      [empresaId, participanteId, grupo_id]
     );
     if ((inscExistente as any[]).length > 0) {
-      const g = (inscExistente as any[])[0].nombre_grupo;
-      res.status(409).json({ error: `Ya estás inscrito en este programa (grupo "${g}").` });
+      res.status(409).json({ error: 'Ya estás inscrito en este grupo.' });
       return;
     }
 

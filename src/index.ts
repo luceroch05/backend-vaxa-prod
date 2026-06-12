@@ -6,6 +6,7 @@ import express from 'express';
 import cors from 'cors';
 import { tenantMiddleware } from './middleware/tenant.middleware';
 import { jwtMiddleware } from './middleware/jwt.middleware';
+import { rateLimit } from './middleware/rate-limit.middleware';
 import { tenantMatchMiddleware } from './middleware/tenant-match.middleware';
 import { requireRootTenant } from './middleware/require-root-tenant.middleware';
 import { creditosAdminRoutes } from './modules/admin/creditos.admin.routes';
@@ -55,9 +56,17 @@ app.use(`${BASE_PATH}/uploads`, express.static(path.join(process.cwd(), 'uploads
 /** Auth — sin tenant middleware (login es público) */
 app.use(`${BASE_PATH}/api/auth`, authRoutes);
 
-/** Endpoints públicos de certificados — sin tenant middleware ni JWT */
-app.use(`${BASE_PATH}/public/certificados`, publicCertificadosRoutes);
-app.get(`${BASE_PATH}/public/certificado/:codigo`,
+/** Endpoints públicos de certificados — sin tenant middleware ni JWT.
+ *  Límite general holgado contra abuso (una carga normal hace varias llamadas:
+ *  /existe, /catalogos, /grupos). El límite ESTRICTO contra scraping de datos
+ *  va aparte, solo en /participante (ver public.routes.ts). */
+const publicLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 200,            // 200 peticiones/min por IP
+  message: 'Demasiadas peticiones. Espera un momento antes de reintentar.',
+});
+app.use(`${BASE_PATH}/public/certificados`, publicLimiter, publicCertificadosRoutes);
+app.get(`${BASE_PATH}/public/certificado/:codigo`, publicLimiter,
   (req, res) => validarPublico(req as any, res).catch((e: Error) => res.status(500).json({ error: e.message })),
 );
 

@@ -2,9 +2,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { getPool } from '../../db/pool';
 import type { LoginDto, LoginResponse, JwtPayload } from './auth.types';
-
-const JWT_SECRET = process.env.JWT_SECRET ?? 'vaxa_secret_dev_change_in_prod';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? '8h';
+import { JWT_SECRET, JWT_EXPIRES_IN } from '../../config/jwt.config';
 
 interface UsuarioRow {
   id: number;

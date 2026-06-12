@@ -13,9 +13,12 @@ export async function getGrupo(req: Request, res: Response): Promise<void> {
 }
 
 export async function createGrupo(req: Request, res: Response): Promise<void> {
-  const { programa_id, nombre_grupo, fecha_inicio, fecha_fin, modalidad_id } = req.body ?? {};
+  const { programa_id, nombre_grupo, fecha_inicio, fecha_fin, modalidad_id, dias_semana, hora_inicio, hora_fin } = req.body ?? {};
   if (!programa_id || !nombre_grupo || !fecha_inicio || !fecha_fin || !modalidad_id) {
     res.status(400).json({ error: 'programa_id, nombre_grupo, fecha_inicio, fecha_fin y modalidad_id son requeridos' }); return;
   }
-  res.status(201).json(await grupoService.create(tid(req), { programa_id, nombre_grupo, fecha_inicio, fecha_fin, modalidad_id }));
+  res.status(201).json(await grupoService.create(tid(req), {
+    programa_id, nombre_grupo, fecha_inicio, fecha_fin, modalidad_id,
+    dias_semana: dias_semana || null, hora_inicio: hora_inicio || null, hora_fin: hora_fin || null,
+  }));
 }

@@ -6,6 +6,9 @@ export class GrupoEntity {
   nombre_grupo!: string;
   fecha_inicio!: string;
   fecha_fin!: string;
+  dias_semana?: string | null;
+  hora_inicio?: string | null;
+  hora_fin?: string | null;
   modalidad_id!: number;
   modalidad_nombre?: string;
   activo!: boolean;

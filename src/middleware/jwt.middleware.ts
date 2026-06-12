@@ -1,8 +1,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import type { JwtPayload } from '../modules/auth/auth.types';
-
-const JWT_SECRET = process.env.JWT_SECRET ?? 'vaxa_secret_dev_change_in_prod';
+import { JWT_SECRET } from '../config/jwt.config';
 
 export interface RequestWithAuth extends Request {
   authUser: JwtPayload;
