@@ -20,6 +20,7 @@ export interface JwtPayload {
   sub: number;       // usuario.id
   empresa: string;   // tenant_slug
   rol: string;
+  sid?: string;      // id de la sesión activa (sesión única por usuario)
   iat?: number;
   exp?: number;
 }

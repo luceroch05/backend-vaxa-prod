@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { randomUUID } from 'crypto';
 import { getPool } from '../../db/pool';
 import type { LoginDto, LoginResponse, JwtPayload } from './auth.types';
 import { JWT_SECRET, JWT_EXPIRES_IN } from '../../config/jwt.config';
@@ -40,10 +41,17 @@ export async function loginService(dto: LoginDto): Promise<LoginResponse> {
     throw new AuthError('Credenciales inválidas', 401);
   }
 
+  // Sesión única: generamos un id de sesión nuevo y lo persistimos. Pisa el de
+  // cualquier sesión anterior, de modo que el token del dispositivo previo deja
+  // de coincidir y queda invalidado en su próxima petición.
+  const sid = randomUUID();
+  await pool.execute('UPDATE usuarios SET session_token = ? WHERE id = ?', [sid, usuario.id]);
+
   const payload: JwtPayload = {
     sub: usuario.id,
     empresa: usuario.tenant_slug,
     rol: usuario.rol_nombre,
+    sid,
   };
 
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions);

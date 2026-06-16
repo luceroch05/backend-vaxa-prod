@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { pool, getEmpresaId } from './db.helper';
 import { creditosRepo } from './creditos.repository';
-import { pdfService } from '../pdf/pdf.service';
+import { pdfService, type PdfDatos } from '../pdf/pdf.service';
 
 import { TipoDocumentoEntity, TipoProgramaEntity, ModalidadEntity } from '../catalogos/catalogo.entity';
 import { ProgramaEntity }      from '../programas/programa.entity';
@@ -908,6 +908,49 @@ export const emisionRepo = {
     return generarPdfYGuardar(rows[0], tenantSlug);
   },
 
+  /** Genera en memoria una VISTA PREVIA del certificado de una inscripción,
+   *  con sus datos reales pero código "MUESTRA". No inserta nada ni gasta crédito.
+   *  Usa el mismo motor que la emisión, así el preview es idéntico al PDF final. */
+  async previewBuffer(tenantSlug: string, inscripcionId: number): Promise<Buffer | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT i.id AS inscripcion_id, i.empresa_id, i.grupo_id,
+              prog.id AS programa_id,
+              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+              p.numero_documento,
+              prog.nombre AS programa_nombre,
+              prog.horas_academicas,
+              tp.nombre AS tipo_programa_nombre,
+              g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
+              m.nombre AS modalidad_nombre,
+              e.razon_social AS empresa_nombre, e.tenant_slug
+       FROM inscripciones i
+       JOIN participantes p       ON p.id   = i.participante_id
+       JOIN grupos_programas g    ON g.id   = i.grupo_id
+       JOIN programas prog        ON prog.id = g.programa_id
+       JOIN tipos_programa tp     ON tp.id  = prog.tipo_programa_id
+       JOIN modalidades m         ON m.id   = g.modalidad_id
+       JOIN empresas e            ON e.id   = i.empresa_id
+       WHERE i.id = ? AND i.empresa_id = ?`,
+      [inscripcionId, empresaId],
+    );
+    const cert = (rows as any[])[0];
+    if (!cert) return null;
+
+    // Bloquear preview si el programa/grupo no tiene diseño configurado (mismo criterio que emitir).
+    const config = await configRepo.findByPrograma(tenantSlug, cert.programa_id, cert.grupo_id ?? 0);
+    const sinDiseno = !config || (!config.plantilla_url && (config.logos?.length ?? 0) === 0 && (config.firmas?.length ?? 0) === 0);
+    if (sinDiseno) {
+      throw new Error('FALTA_CONFIG: Falta configurar el diseño del certificado de este programa. Ve a Configuración y agrega al menos el fondo, un logo o una firma.');
+    }
+
+    cert.codigo_unico  = 'MUESTRA';
+    cert.fecha_emision = new Date().toISOString().split('T')[0];
+
+    const datos = await construirPdfDatos(cert, tenantSlug);
+    return pdfService.generarBuffer(datos);
+  },
+
   async validarPublico(codigoUnico: string): Promise<CertificadoPublicoEntity | null> {
     const [rows] = await pool().query<any[]>(
       `SELECT c.codigo_unico, c.fecha_emision, c.url,
@@ -978,10 +1021,12 @@ export const emisionRepo = {
 };
 
 /* ── Helper: genera el PDF y guarda la URL en BD ────────────── */
-async function generarPdfYGuardar(cert: any, tenantSlug: string): Promise<string | null> {
-  try {
-    // Obtener grupo_id de la inscripción (para buscar config específica del grupo)
-    let grupoId = 0;
+/** Arma el objeto PdfDatos a partir de una fila enriquecida (cert o inscripción).
+ *  Lo usan tanto la emisión real como la previsualización, para que el preview
+ *  salga idéntico al PDF final. NO escribe en BD ni en disco. */
+async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDatos> {
+  // Obtener grupo_id de la inscripción (para buscar config específica del grupo)
+  let grupoId = 0;
     if (cert.inscripcion_id) {
       const [insRows] = await pool().query<any[]>(
         'SELECT grupo_id FROM inscripciones WHERE id = ? LIMIT 1',
@@ -993,7 +1038,6 @@ async function generarPdfYGuardar(cert: any, tenantSlug: string): Promise<string
     // Buscar config: primero la del grupo, fallback a la del programa
     const config = await configRepo.findByPrograma(tenantSlug, cert.programa_id, grupoId);
 
-    const outputDir = path.join(process.cwd(), 'uploads', 'certificados', String(cert.empresa_id));
     const fechaEmision = typeof cert.fecha_emision === 'string'
       ? cert.fecha_emision
       : new Date(cert.fecha_emision).toISOString().substring(0, 10);
@@ -1028,7 +1072,7 @@ async function generarPdfYGuardar(cert: any, tenantSlug: string): Promise<string
       }
     }
 
-    const urlRelativa = await pdfService.generar({
+    return {
       participante_nombre:  cert.participante_nombre,
       programa_nombre:      cert.programa_nombre,
       tipo_programa:        cert.tipo_programa_nombre ?? 'Certificado',
@@ -1049,9 +1093,16 @@ async function generarPdfYGuardar(cert: any, tenantSlug: string): Promise<string
         imagen: f.imagen_firma, orden: f.orden,
       })),
       acta,
-    }, outputDir);
+    };
+}
 
-    // Guardar URL en BD
+/** Genera el PDF del certificado y guarda su URL en BD. */
+async function generarPdfYGuardar(cert: any, tenantSlug: string): Promise<string | null> {
+  try {
+    const datos = await construirPdfDatos(cert, tenantSlug);
+    const outputDir = path.join(process.cwd(), 'uploads', 'certificados', String(cert.empresa_id));
+    const urlRelativa = await pdfService.generar(datos, outputDir);
+
     await pool().query(
       'UPDATE certificados SET url = ? WHERE id = ?',
       [`/${urlRelativa}`, cert.id],

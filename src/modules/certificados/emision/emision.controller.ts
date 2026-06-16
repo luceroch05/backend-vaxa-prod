@@ -45,3 +45,21 @@ export async function regenerarPDF(req: Request, res: Response): Promise<void> {
   if (!url) { res.status(404).json({ error: 'Certificado no encontrado' }); return; }
   res.json({ url: `/${url}` });
 }
+
+/** Vista previa del certificado de una inscripción (PDF inline). No emite ni gasta crédito. */
+export async function previewCertificado(req: Request, res: Response): Promise<void> {
+  try {
+    const buffer = await emisionService.preview(tid(req), Number(req.params.inscripcionId));
+    if (!buffer) { res.status(404).json({ error: 'Inscripción no encontrada' }); return; }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', 'inline; filename="vista-previa.pdf"');
+    res.send(buffer);
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (msg.startsWith('FALTA_CONFIG:')) {
+      res.status(409).json({ error: msg, code: 'FALTA_CONFIG' });
+      return;
+    }
+    throw e;
+  }
+}

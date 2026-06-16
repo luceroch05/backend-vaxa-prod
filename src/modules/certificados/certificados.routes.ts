@@ -9,7 +9,7 @@ import { listInscripciones, createInscripcion, cambiarEstado, inscribir } from '
 import { listLogos, createLogo, deleteLogo }                         from './logos/logo.controller';
 import { listFirmas, createFirma, deleteFirma }                      from './firmas/firma.controller';
 import { getConfig, upsertConfig, listGruposConConfig, congelarGrupo, eliminarConfigGrupo } from './config/config.controller';
-import { listCertificados, generarCertificado, anularCertificado, eliminarCertificado, regenerarPDF } from './emision/emision.controller';
+import { listCertificados, generarCertificado, anularCertificado, eliminarCertificado, regenerarPDF, previewCertificado } from './emision/emision.controller';
 import { listUnidades, createUnidad, updateUnidad, deleteUnidad } from './unidades/unidad.controller';
 import { getNotasGrupo, guardarNotas } from './notas/nota.controller';
 import { getCreditos, getMovimientos } from './creditos/credito.controller';
@@ -72,6 +72,7 @@ router.put('/notas/inscripcion/:inscripcionId', w(guardarNotas));           // g
 
 // Emision
 router.get('/emision',                          w(listCertificados));
+router.get('/emision/preview/:inscripcionId',   w(previewCertificado));      // vista previa PDF (no emite)
 router.post('/emision/generar/:inscripcionId',  w(generarCertificado));
 router.patch('/emision/:id/anular',             w(anularCertificado));
 router.delete('/emision/:id',                   w(eliminarCertificado));     // elimina y DEVUELVE crédito

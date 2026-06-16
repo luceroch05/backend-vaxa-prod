@@ -7,4 +7,5 @@ export const emisionService = {
   anular:        (tenantSlug: string, id: number, uid?: number)            => emisionRepo.anular(tenantSlug, id, uid),
   eliminar:      (tenantSlug: string, id: number, uid?: number)            => emisionRepo.eliminar(tenantSlug, id, uid),
   regenerarPDF:  (tenantSlug: string, id: number)                          => emisionRepo.regenerarPDF(tenantSlug, id),
+  preview:       (tenantSlug: string, inscripcionId: number)               => emisionRepo.previewBuffer(tenantSlug, inscripcionId),
 };

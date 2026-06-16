@@ -33,7 +33,6 @@ export interface PdfDatos {
   plantilla_url?:      string | null;
   logos:               PdfLogo[];
   firmas:              PdfFirma[];
-  /** Si el programa tiene unidades, el acta de notas se agrega como 2ª página del mismo PDF. */
   acta?:               PdfActaDatos | null;
 }
 
@@ -76,29 +75,38 @@ function fmtFecha(d?: string): string {
   return `${day} de ${meses[m - 1]} de ${y}`;
 }
 
-function imagenABuffer(src: string | null | undefined): Buffer | null {
-  if (!src) return null;
-  if (src.startsWith('data:')) {
-    const parts = src.split(',');
-    if (parts.length < 2) return null;
-    try { return Buffer.from(parts[1], 'base64'); }
-    catch { return null; }
-  }
-  // Soporte para rutas relativas (no usado por ahora)
-  const abs = path.join(process.cwd(), 'public', src);
-  if (fs.existsSync(abs)) return fs.readFileSync(abs);
-  return null;
+interface ImagenBuffer {
+  data: Buffer;
+  type: string; // "image/png" | "image/jpeg" | etc.
 }
 
-/**
- * Dibuja el ACTA DE NOTAS en la página ACTUAL del documento (se asume ya creada,
- * A4 con márgenes). Se adapta al ancho disponible, así sirve en landscape o portrait.
- */
+function imagenABuffer(src: string | null | undefined): ImagenBuffer | null {
+  if (!src) return null;
+
+  if (src.startsWith('data:')) {
+    // Extrae el mime type y el base64 limpio del data URL
+    const match = src.match(/^data:(image\/[a-zA-Z+]+);base64,(.+)$/s);
+    if (!match) return null;
+    try {
+      return { data: Buffer.from(match[2], 'base64'), type: match[1] };
+    } catch { return null; }
+  }
+
+  // Soporte para rutas relativas
+  const abs = path.join(process.cwd(), 'public', src);
+  if (!fs.existsSync(abs)) return null;
+  const ext = path.extname(abs).toLowerCase().slice(1);
+  const mimeMap: Record<string, string> = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
+  };
+  return { data: fs.readFileSync(abs), type: mimeMap[ext] ?? 'image/png' };
+}
+
 function pintarActa(doc: any, datos: PdfActaDatos): void {
-  const left   = doc.page.margins.left;
-  const right  = doc.page.width - doc.page.margins.right;
+  const left     = doc.page.margins.left;
+  const right    = doc.page.width - doc.page.margins.right;
   const contentW = right - left;
-  const topY = doc.page.margins.top;
+  const topY     = doc.page.margins.top;
 
   const fechaIni = fmtFecha(datos.fecha_inicio);
   const fechaFin = fmtFecha(datos.fecha_fin);
@@ -119,9 +127,9 @@ function pintarActa(doc: any, datos: PdfActaDatos): void {
     doc.moveDown(0.35);
   };
   fila('Participante:', datos.participante_nombre);
-  fila('Documento:', datos.numero_documento);
-  fila('Programa:', datos.programa_nombre);
-  fila('Grupo:', datos.nombre_grupo);
+  fila('Documento:',    datos.numero_documento);
+  fila('Programa:',     datos.programa_nombre);
+  fila('Grupo:',        datos.nombre_grupo);
   if (fechaIni || fechaFin) fila('Periodo:', `${fechaIni}${fechaIni && fechaFin ? ' al ' : ''}${fechaFin}`);
   doc.moveDown(0.8);
 
@@ -134,9 +142,9 @@ function pintarActa(doc: any, datos: PdfActaDatos): void {
 
   doc.rect(left, y, contentW, rowH).fill('#0f172a');
   doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(9.5);
-  doc.text('N°', left + 6, y + 7, { width: colNum - 6 });
-  doc.text(datos.unidad_label.toUpperCase(), left + colNum + 6, y + 7, { width: colUnidad - 12 });
-  doc.text('NOTA', left + colNum + colUnidad, y + 7, { width: colNota, align: 'center' });
+  doc.text('N°',                              left + 6,                y + 7, { width: colNum - 6 });
+  doc.text(datos.unidad_label.toUpperCase(),  left + colNum + 6,       y + 7, { width: colUnidad - 12 });
+  doc.text('NOTA',                            left + colNum + colUnidad, y + 7, { width: colNota, align: 'center' });
   y += rowH;
 
   const unidadesOrden = [...datos.unidades].sort((a, b) => a.orden - b.orden);
@@ -145,7 +153,7 @@ function pintarActa(doc: any, datos: PdfActaDatos): void {
     if (i % 2 === 0) doc.rect(left, y, contentW, rowH).fill('#f8fafc');
     doc.fillColor('#334155').text(String(i + 1), left + 6, y + 7, { width: colNum - 6 });
     doc.fillColor('#0f172a').text(u.nombre, left + colNum + 6, y + 7, { width: colUnidad - 12 });
-    const notaTxt = u.nota === null || u.nota === undefined ? '—' : u.nota.toFixed(2);
+    const notaTxt = u.nota == null ? '—' : u.nota.toFixed(2);
     doc.font('Helvetica-Bold').fillColor('#0f172a')
       .text(notaTxt, left + colNum + colUnidad, y + 7, { width: colNota, align: 'center' });
     doc.font('Helvetica');
@@ -155,11 +163,9 @@ function pintarActa(doc: any, datos: PdfActaDatos): void {
 
   // ── Resumen final ──
   y += 18;
-  const promedioTxt = datos.promedio === null || datos.promedio === undefined ? '—' : datos.promedio.toFixed(2);
-  const condicion = !datos.completo
-    ? 'PENDIENTE (faltan notas)'
-    : datos.aprobado ? 'APROBADO' : 'DESAPROBADO';
-  const condColor = !datos.completo ? '#92400e' : datos.aprobado ? '#15803d' : '#b91c1c';
+  const promedioTxt = datos.promedio == null ? '—' : datos.promedio.toFixed(2);
+  const condicion   = !datos.completo ? 'PENDIENTE (faltan notas)' : datos.aprobado ? 'APROBADO' : 'DESAPROBADO';
+  const condColor   = !datos.completo ? '#92400e' : datos.aprobado ? '#15803d' : '#b91c1c';
 
   doc.font('Helvetica-Bold').fontSize(11).fillColor('#475569')
     .text('Promedio final: ', left, y, { continued: true })
@@ -171,95 +177,71 @@ function pintarActa(doc: any, datos: PdfActaDatos): void {
     .text(`Condición: ${condicion}`, left, doc.y);
 
   // ── Footer ──
-  // OJO: el texto debe terminar ANTES del margen inferior (maxY = height - margin.bottom),
-  // si no PDFKit agrega una página extra. Dejamos holgura para el alto de línea.
   const footerY = doc.page.height - doc.page.margins.bottom - 24;
   doc.font('Helvetica').fontSize(8).fillColor('#9ca3af')
     .text(`Documento generado por ${datos.empresa_nombre} — Acta de notas`,
       left, footerY, { width: contentW, align: 'center', lineBreak: false });
 }
 
-/* ── Servicio ──────────────────────────────────────────────── */
-export const pdfService = {
-  /**
-   * Genera el PDF del certificado y lo guarda en disco.
-   * Retorna la ruta relativa (ej: 'uploads/certificados/CERT-1-XXX.pdf').
-   */
-  async generar(datos: PdfDatos, outputDir: string): Promise<string> {
-    // 1) Asegurar carpeta de salida
-    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+/* ── Preparación de QR + cuerpo (común a archivo y buffer) ───── */
+async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrDataUrl: string }> {
+  const qrUrl    = `${process.env.PUBLIC_FRONTEND_URL ?? 'http://localhost:5173'}/${datos.empresa_nombre}/certificados/validar?codigo=${datos.codigo_unico}`;
+  const qrDataUrl = await QRCode.toDataURL(qrUrl, { errorCorrectionLevel: 'M', width: 200, margin: 1 });
 
-    const filename   = `${datos.codigo_unico}.pdf`;
-    const outputPath = path.join(outputDir, filename);
+  const fechaIni   = fmtFecha(datos.fecha_inicio);
+  const fechaFin   = fmtFecha(datos.fecha_fin);
+  const periodo    = fechaIni && fechaFin ? `, realizado del ${fechaIni} al ${fechaFin}` : '';
+  const cuerpoAuto = `Por haber completado satisfactoriamente ${datos.tipo_programa} "${datos.programa_nombre}" con una duración de ${datos.horas_academicas} horas académicas${periodo}.`;
+  const cuerpo = (datos.texto_personalizado?.trim() || cuerpoAuto)
+    .replace(/\{nombre\}/gi,       datos.participante_nombre)
+    .replace(/\{participante\}/gi, datos.participante_nombre)
+    .replace(/\{programa\}/gi,     datos.programa_nombre)
+    .replace(/\{curso\}/gi,        datos.programa_nombre)
+    .replace(/\{horas\}/gi,        String(datos.horas_academicas))
+    .replace(/\{fecha\}/gi,        fmtFecha(datos.fecha_emision))
+    .replace(/\{fechaInicio\}/gi,  fechaIni)
+    .replace(/\{fechaFin\}/gi,     fechaFin);
 
-    // 2) Generar QR
-    const qrUrl = `${process.env.PUBLIC_FRONTEND_URL ?? 'http://localhost:5173'}/${datos.empresa_nombre}/certificados/validar?codigo=${datos.codigo_unico}`;
-    const qrDataUrl = await QRCode.toDataURL(qrUrl, { errorCorrectionLevel: 'M', width: 200, margin: 1 });
+  return { cuerpo, qrDataUrl };
+}
 
-    // 3) Construir cuerpo (personalizado o auto)
-    const fechaIni = fmtFecha(datos.fecha_inicio);
-    const fechaFin = fmtFecha(datos.fecha_fin);
-    const periodo  = fechaIni && fechaFin ? `, realizado del ${fechaIni} al ${fechaFin}` : '';
-    const cuerpoAuto = `Por haber completado satisfactoriamente ${datos.tipo_programa} "${datos.programa_nombre}" con una duración de ${datos.horas_academicas} horas académicas${periodo}.`;
-    const cuerpo = (datos.texto_personalizado?.trim() ? datos.texto_personalizado.trim() : cuerpoAuto)
-      .replace(/\{nombre\}/gi,        datos.participante_nombre)
-      .replace(/\{participante\}/gi,  datos.participante_nombre)
-      .replace(/\{programa\}/gi,      datos.programa_nombre)
-      .replace(/\{curso\}/gi,         datos.programa_nombre)
-      .replace(/\{horas\}/gi,         String(datos.horas_academicas))
-      .replace(/\{fecha\}/gi,         fmtFecha(datos.fecha_emision))
-      .replace(/\{fechaInicio\}/gi,   fechaIni)
-      .replace(/\{fechaFin\}/gi,      fechaFin);
-
-    // 4) Crear documento
-    return new Promise<string>((resolve, reject) => {
-      try {
-        const doc = new PDFDocument({
-          size: 'A4', layout: 'landscape', margin: 0,
-          info: { Title: `Certificado ${datos.codigo_unico}`, Author: datos.empresa_nombre },
-        });
-        const stream = fs.createWriteStream(outputPath);
-        doc.pipe(stream);
-
-        // ── FONDO ─────────────────────────────────────────────
-        const fondoBuf = imagenABuffer(datos.plantilla_url);
-        if (fondoBuf) {
-          try { doc.image(fondoBuf, 0, 0, { width: W, height: H }); }
+/* ── Dibujo del certificado (idéntico para PDF en disco y preview en memoria) ─ */
+function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl: string): void {
+        // ── FONDO ────────────────────────────────────────────
+        const fondo = imagenABuffer(datos.plantilla_url);
+        if (fondo) {
+          try { doc.image(fondo.data, 0, 0, { width: W, height: H }); }
           catch (e) { console.warn('Error fondo:', (e as Error).message); }
         }
 
-        // ── LOGOS (top:60px, w:180, h:120 → en pt) ───────────
-        const LOGO_W    = 180 * PX;   // 135pt
-        const LOGO_H    = 120 * PX;   //  90pt
-        const LOGO_Y    = 60  * PX;   //  45pt
-        const LOGO_SIDE = 80  * PX;   //  60pt
-        const sorted = [...datos.logos].sort((a, b) => a.orden - b.orden);
+        // ── LOGOS ─────────────────────────────────────────────
+        const LOGO_W    = 180 * PX;
+        const LOGO_H    = 120 * PX;
+        const LOGO_Y    =  60 * PX;
+        const LOGO_SIDE =  80 * PX;
+        const sorted    = [...datos.logos].sort((a, b) => a.orden - b.orden);
 
         const posiciones: number[] = [];
-        if (sorted.length === 1) {
-          posiciones.push((W - LOGO_W) / 2);
-        } else if (sorted.length === 2) {
-          posiciones.push(LOGO_SIDE, W - LOGO_W - LOGO_SIDE);
-        } else if (sorted.length >= 3) {
-          posiciones.push(LOGO_SIDE, (W - LOGO_W) / 2, W - LOGO_W - LOGO_SIDE);
-        }
+        if      (sorted.length === 1) posiciones.push((W - LOGO_W) / 2);
+        else if (sorted.length === 2) posiciones.push(LOGO_SIDE, W - LOGO_W - LOGO_SIDE);
+        else if (sorted.length >= 3)  posiciones.push(LOGO_SIDE, (W - LOGO_W) / 2, W - LOGO_W - LOGO_SIDE);
 
         sorted.slice(0, 3).forEach((logo, i) => {
-          const buf = imagenABuffer(logo.imagen);
-          if (!buf) return;
+          const img = imagenABuffer(logo.imagen);
+          if (!img) return;
           try {
-            doc.image(buf, posiciones[i], LOGO_Y, {
+            doc.image(img.data, posiciones[i], LOGO_Y, {
               fit: [LOGO_W, LOGO_H], align: 'center', valign: 'center',
             });
           } catch (e) { console.warn(`Error logo ${i}:`, (e as Error).message); }
         });
 
-        // ── BLOQUE CENTRAL (texto centrado vertical/horizontal) ──
-        const tituloSize = 32 * PX;
-        const nombreSize = 42 * PX;
-        const cuerpoSize = (cuerpo.length > 200 ? 18 : 20) * PX;
+        // ── BLOQUE CENTRAL ────────────────────────────────────
+        const tituloSize  = 32 * PX;
+        const nombreSize  = 42 * PX;
+        const cuerpoSize  = (cuerpo.length > 200 ? 18 : 20) * PX;
         const programaSize = 22 * PX;
-        const textWidth  = W - 2 * (180 * PX);  // ~570pt
+        const textWidth   = W - 2 * (180 * PX);
 
         doc.font('Helvetica-Bold').fontSize(tituloSize);
         const tituloH = doc.heightOfString(datos.tipo_programa.toUpperCase(), { width: textWidth });
@@ -272,94 +254,85 @@ export const pdfService = {
 
         doc.font('Times-Italic').fontSize(programaSize);
         const programaStr = `"${datos.programa_nombre}"`;
-        const programaH = doc.heightOfString(programaStr, { width: textWidth, lineGap: 2 });
+        const programaH   = doc.heightOfString(programaStr, { width: textWidth, lineGap: 2 });
 
-        const margenTitulo = 15 * PX;
-        const margenNombre = 20 * PX;
-        const margenCuerpo = 20 * PX;
-        const margenPrograma = 15 * PX;
+        const margenTitulo  = 15 * PX;
+        const margenNombre  = 20 * PX;
+        const margenCuerpo  = 20 * PX;
 
         const blockH =
-          tituloH + margenTitulo +
-          nombreH + margenNombre +
-          cuerpoH + margenCuerpo +
+          tituloH  + margenTitulo +
+          nombreH  + margenNombre +
+          cuerpoH  + margenCuerpo +
           programaH;
 
-        const centroTop = 200 * PX;          // bajo los logos
-        const centroBot = H - 180 * PX;      // sobre las firmas
+        const centroTop = 200 * PX;
+        const centroBot = H - 180 * PX;
         const centroH   = centroBot - centroTop;
         let currentY    = centroTop + Math.max(0, (centroH - blockH) / 2);
+        const textX     = 180 * PX;
 
-        const textX = 180 * PX;
-
-        // Título
         doc.font('Helvetica-Bold').fontSize(tituloSize).fillColor('#1a365d')
           .text(datos.tipo_programa.toUpperCase(), textX, currentY, {
             width: textWidth, align: 'center', characterSpacing: 1,
           });
         currentY += tituloH + margenTitulo;
 
-        // Nombre
         doc.font('Times-Bold').fontSize(nombreSize).fillColor('#0f172a')
           .text(datos.participante_nombre, textX, currentY, {
             width: textWidth, align: 'center', lineGap: 2,
           });
         currentY += nombreH + margenNombre;
 
-        // Cuerpo
         doc.font('Helvetica').fontSize(cuerpoSize).fillColor('#475569')
           .text(cuerpo, textX, currentY, {
             width: textWidth, align: 'center', lineGap: 4,
           });
         currentY += cuerpoH + margenCuerpo;
 
-        // Nombre programa
         doc.font('Times-Italic').fontSize(programaSize).fillColor('#1e40af')
           .text(programaStr, textX, currentY, {
             width: textWidth, align: 'center', lineGap: 2,
           });
 
-        // ── QR (bottom-right) ────────────────────────────────
+        // ── QR ───────────────────────────────────────────────
         const QR_SIZE = 75;
-        const qrX = W - 70 * PX - QR_SIZE;
-        const qrY = H - 40 * PX - QR_SIZE;
-        const qrBuf = imagenABuffer(qrDataUrl);
-        if (qrBuf) {
-          doc.image(qrBuf, qrX, qrY, { width: QR_SIZE, height: QR_SIZE });
+        const qrX     = W - 70 * PX - QR_SIZE;
+        const qrY     = H - 40 * PX - QR_SIZE;
+        const qrImg   = imagenABuffer(qrDataUrl);
+        if (qrImg) {
+          doc.image(qrImg.data, qrX, qrY, { width: QR_SIZE, height: QR_SIZE });
         }
         doc.font('Courier').fontSize(7).fillColor('#94a3b8')
           .text(datos.codigo_unico, qrX - 5, qrY + QR_SIZE + 4, {
             width: QR_SIZE + 10, align: 'center',
           });
 
-        // ── FIRMAS (centradas) ───────────────────────────────
+        // ── FIRMAS ───────────────────────────────────────────
         const firmasOrdenadas = [...datos.firmas].sort((a, b) => a.orden - b.orden);
         if (firmasOrdenadas.length > 0) {
-          const SIG_W  = 150;
+          const SIG_W     = 150;
           const SIG_IMG_H = 40;
-          const gap = firmasOrdenadas.length === 1 ? 0 : firmasOrdenadas.length === 2 ? 90 : 50;
-          const totalW = firmasOrdenadas.length * SIG_W + (firmasOrdenadas.length - 1) * gap;
-
+          const gap       = firmasOrdenadas.length === 1 ? 0 : firmasOrdenadas.length === 2 ? 90 : 50;
+          const totalW    = firmasOrdenadas.length * SIG_W + (firmasOrdenadas.length - 1) * gap;
           const nameSize  = 10;
           const cargoSize = 8.5;
-          const blockH = SIG_IMG_H + 4 + nameSize * 1.4 + cargoSize * 1.4;
-          const startY = H - 35 * PX - blockH;
-          let x = (W - totalW) / 2;
+          const sigBlockH = SIG_IMG_H + 4 + nameSize * 1.4 + cargoSize * 1.4;
+          const startY    = H - 35 * PX - sigBlockH;
+          let x           = (W - totalW) / 2;
 
           for (const f of firmasOrdenadas) {
             const fb = imagenABuffer(f.imagen);
             if (fb) {
-              doc.image(fb, x, startY, { fit: [SIG_W, SIG_IMG_H], align: 'center', valign: 'bottom' });
+              doc.image(fb.data, x, startY, { fit: [SIG_W, SIG_IMG_H], align: 'center', valign: 'bottom' });
             }
             const lineY = startY + SIG_IMG_H - 8;
             doc.moveTo(x, lineY).lineTo(x + SIG_W, lineY)
               .strokeColor('#475569').lineWidth(1).stroke();
-
             doc.font('Helvetica-Bold').fontSize(nameSize).fillColor('#1e293b')
               .text(f.nombre_autoridad, x, lineY + 3, { width: SIG_W, align: 'center', lineBreak: false });
             doc.font('Helvetica-Oblique').fontSize(cargoSize).fillColor('#64748b')
               .text(f.cargo, x, lineY + 3 + nameSize * 1.3, { width: SIG_W, align: 'center', lineBreak: false });
-
             x += SIG_W + gap;
           }
         }
@@ -371,12 +344,47 @@ export const pdfService = {
           .text(`Certificado generado por ${datos.empresa_nombre} — Sistema de Certificación`,
             0, H - 18, { width: W, align: 'center', lineBreak: false });
 
-        // ── PÁGINA 2: ACTA DE NOTAS (solo si el programa tiene unidades) ──
+        // ── PÁGINA 2: ACTA DE NOTAS ───────────────────────────
         if (datos.acta && datos.acta.unidades.length > 0) {
           doc.addPage({ size: 'A4', layout: 'landscape', margin: 50 });
           pintarActa(doc, datos.acta);
         }
+}
 
+/* ── Marca de agua (SOLO preview) ───────────────────────────────
+   Hace que la vista previa sea inservible como certificado real:
+   no se puede descargar/imprimir y usar sin emitir (sin gastar crédito). */
+function pintarMarcaAgua(doc: any): void {
+  doc.save();
+  doc.rotate(-30, { origin: [W / 2, H / 2] });
+  doc.fillColor('#dc2626').opacity(0.18)
+    .font('Helvetica-Bold').fontSize(95)
+    .text('VISTA PREVIA', 0, H / 2 - 70, { width: W, align: 'center' });
+  doc.opacity(0.22).fontSize(22)
+    .text('SIN VALIDEZ · NO EMITIDO', 0, H / 2 + 55, { width: W, align: 'center' });
+  doc.restore();
+  doc.opacity(1);
+}
+
+/* ── Servicio ──────────────────────────────────────────────── */
+export const pdfService = {
+  /** Genera el PDF y lo guarda en disco. Devuelve la ruta relativa. */
+  async generar(datos: PdfDatos, outputDir: string): Promise<string> {
+    if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
+
+    const filename   = `${datos.codigo_unico}.pdf`;
+    const outputPath = path.join(outputDir, filename);
+    const { cuerpo, qrDataUrl } = await prepararContenido(datos);
+
+    return new Promise<string>((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({
+          size: 'A4', layout: 'landscape', margin: 0,
+          info: { Title: `Certificado ${datos.codigo_unico}`, Author: datos.empresa_nombre },
+        });
+        const stream = fs.createWriteStream(outputPath);
+        doc.pipe(stream);
+        pintarCertificado(doc, datos, cuerpo, qrDataUrl);
         doc.end();
         stream.on('finish', () => {
           const rel = path.relative(process.cwd(), outputPath).replace(/\\/g, '/');
@@ -387,7 +395,34 @@ export const pdfService = {
     });
   },
 
-  /** Elimina un PDF del disco si existe */
+  /** Genera el PDF en memoria (sin escribir en disco). Lo usa la previsualización:
+   *  mismo motor y mismo dibujo que `generar`, así el preview es idéntico al PDF real. */
+  async generarBuffer(datos: PdfDatos): Promise<Buffer> {
+    const { cuerpo, qrDataUrl } = await prepararContenido(datos);
+
+    return new Promise<Buffer>((resolve, reject) => {
+      try {
+        const doc = new PDFDocument({
+          size: 'A4', layout: 'landscape', margin: 0, bufferPages: true,
+          info: { Title: `Vista previa ${datos.codigo_unico}`, Author: datos.empresa_nombre },
+        });
+        const chunks: Buffer[] = [];
+        doc.on('data', (c: Buffer) => chunks.push(c));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        pintarCertificado(doc, datos, cuerpo, qrDataUrl);
+        // Marca de agua en TODAS las páginas (certificado + acta) para que el
+        // preview no pueda usarse como documento real sin emitir.
+        const range = doc.bufferedPageRange();
+        for (let i = range.start; i < range.start + range.count; i++) {
+          doc.switchToPage(i);
+          pintarMarcaAgua(doc);
+        }
+        doc.end();
+      } catch (err) { reject(err); }
+    });
+  },
+
   eliminar(urlRelativa: string): void {
     try {
       const abs = path.join(process.cwd(), urlRelativa);
