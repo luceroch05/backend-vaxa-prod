@@ -186,11 +186,13 @@ export const adminRepo = {
     const [emp] = await pool().query<any[]>('SELECT id FROM empresas WHERE id = ? LIMIT 1', [empresaId]);
     if (!(emp as any[]).length) throw new Error('Empresa no encontrada');
 
-    // Correo único dentro de la empresa
+    // Correo único GLOBAL (el nombre de usuario no puede repetirse en ningún
+    // sistema/empresa). Una persona = una cuenta; el acceso a varios productos se
+    // da con filas en usuario_producto, no duplicando el usuario.
     const [dup] = await pool().query<any[]>(
-      'SELECT id FROM usuarios WHERE empresa_id = ? AND correo = ? LIMIT 1', [empresaId, correo],
+      'SELECT id FROM usuarios WHERE correo = ? LIMIT 1', [correo],
     );
-    if ((dup as any[]).length) throw new Error('Ya existe un usuario con ese correo en esta empresa');
+    if ((dup as any[]).length) throw new Error('Ese correo ya está en uso. El nombre de usuario debe ser único.');
 
     const hash = await bcrypt.hash(dto.contrasena, 10);
     const [res] = await pool().query<any>(
@@ -249,10 +251,11 @@ export const adminRepo = {
     if (dto.correo !== undefined) {
       const correo = dto.correo.toLowerCase().trim();
       if (!correo) throw new Error('El correo no puede estar vacío');
+      // Correo único GLOBAL (excluyendo al propio usuario).
       const [dup] = await pool().query<any[]>(
-        'SELECT id FROM usuarios WHERE empresa_id = ? AND correo = ? AND id <> ? LIMIT 1', [empresaId, correo, usuarioId],
+        'SELECT id FROM usuarios WHERE correo = ? AND id <> ? LIMIT 1', [correo, usuarioId],
       );
-      if ((dup as any[]).length) throw new Error('Ya existe otro usuario con ese correo en esta empresa');
+      if ((dup as any[]).length) throw new Error('Ese correo ya está en uso. El nombre de usuario debe ser único.');
       fields.push('correo = ?'); values.push(correo);
     }
     if (dto.contrasena) {
