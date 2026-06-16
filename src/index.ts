@@ -2,8 +2,10 @@
 // (SetEnv en .htaccess), así que si dotenv no está instalado, no debe romper.
 try { require('dotenv').config(); } catch { /* dotenv ausente en prod: ok */ }
 import * as path from 'path';
+import * as http from 'http';
 import express from 'express';
 import cors from 'cors';
+import { initSessionSocket } from './realtime/session-socket';
 import { tenantMiddleware } from './middleware/tenant.middleware';
 import { jwtMiddleware } from './middleware/jwt.middleware';
 import { rateLimit } from './middleware/rate-limit.middleware';
@@ -104,7 +106,12 @@ app.use((_req, res) => {
 });
 
 const PORT = process.env.PORT ?? 4000;
-app.listen(PORT, () => {
+
+// Servidor HTTP explícito para poder compartirlo con el WebSocket de sesión única.
+const server = http.createServer(app);
+initSessionSocket(server);
+
+server.listen(PORT, () => {
   console.log(`Vaxa Back escuchando en http://localhost:${PORT}`);
   console.log(`  Auth:    POST ${BASE_PATH}/api/auth/login`);
   console.log(`  Certs:   ${BASE_PATH}/api/certificados (requiere x-tenant-id + JWT)`);

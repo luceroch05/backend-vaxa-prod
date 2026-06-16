@@ -24,11 +24,21 @@ router.patch('/empresas/:id', w(async (req, res) => {
 
 /** Usuarios por empresa */
 router.get('/empresas/:id/usuarios', w(async (req, res) => {
-  res.json(await adminRepo.listUsuarios(Number(req.params.id)));
+  const producto = (req.query.producto as string | undefined)?.trim() || undefined;
+  res.json(await adminRepo.listUsuarios(Number(req.params.id), producto));
 }));
 
 router.post('/empresas/:id/usuarios', w(async (req, res) => {
   res.status(201).json(await adminRepo.crearUsuario(Number(req.params.id), req.body ?? {}, uid(req)));
+}));
+
+router.patch('/empresas/:id/usuarios/:usuarioId', w(async (req, res) => {
+  res.json(await adminRepo.editarUsuario(Number(req.params.id), Number(req.params.usuarioId), req.body ?? {}));
+}));
+
+router.delete('/empresas/:id/usuarios/:usuarioId', w(async (req, res) => {
+  const producto = (req.query.producto as string | undefined)?.trim() || undefined;
+  res.json(await adminRepo.eliminarUsuario(Number(req.params.id), Number(req.params.usuarioId), producto));
 }));
 
 /** Roles (para el selector al crear usuario) */

@@ -26,20 +26,36 @@ export async function jwtMiddleware(req: Request, res: Response, next: NextFunct
     return;
   }
 
-  // Sesión única: el token solo es válido si su `sid` coincide con la sesión
-  // activa guardada en BD. Al iniciar sesión en otro dispositivo se regenera ese
-  // id, dejando fuera al token anterior. Si no hay BD (dev), se omite el chequeo.
+  // Sesión única POR PRODUCTO: el token solo es válido si su `sid` coincide con la
+  // sesión activa guardada para ESE producto (usuario_producto.session_token). Si
+  // el token no trae producto o la cuenta no tiene fila de producto, se usa el
+  // modo legacy (usuarios.session_token). Si no hay BD (dev), se omite el chequeo.
   try {
     const pool = getPool();
     if (pool) {
-      const [rows] = await pool.execute<any[]>(
-        'SELECT session_token FROM usuarios WHERE id = ?',
-        [payload.sub],
-      );
-      const activo = rows[0]?.session_token as string | null | undefined;
+      let activo: string | null | undefined;
+      let encontrado = false;
 
-      // Si hay una sesión activa registrada y el token no la trae o no coincide,
-      // se trata de una sesión revocada (login desde otro lugar).
+      if (payload.producto) {
+        try {
+          const [rows] = await pool.execute<any[]>(
+            `SELECT up.session_token FROM usuario_producto up
+             JOIN productos p ON p.id = up.producto_id
+             WHERE up.usuario_id = ? AND p.slug = ?`,
+            [payload.sub, payload.producto],
+          );
+          if (rows.length) { activo = rows[0].session_token; encontrado = true; }
+        } catch { /* migración pendiente → cae a legacy */ }
+      }
+
+      if (!encontrado) {
+        const [rows] = await pool.execute<any[]>(
+          'SELECT session_token FROM usuarios WHERE id = ?', [payload.sub],
+        );
+        activo = rows[0]?.session_token as string | null | undefined;
+      }
+
+      // Si hay una sesión activa registrada y el token no coincide → revocada.
       if (activo && activo !== payload.sid) {
         res.status(401).json({
           error: 'Tu sesión se cerró porque iniciaste sesión en otro dispositivo.',

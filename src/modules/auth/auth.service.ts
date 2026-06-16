@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { randomUUID } from 'crypto';
 import { getPool } from '../../db/pool';
+import { revokeOtherSessions } from '../../realtime/session-socket';
 import type { LoginDto, LoginResponse, JwtPayload } from './auth.types';
 import { JWT_SECRET, JWT_EXPIRES_IN } from '../../config/jwt.config';
 
@@ -41,16 +42,86 @@ export async function loginService(dto: LoginDto): Promise<LoginResponse> {
     throw new AuthError('Credenciales inválidas', 401);
   }
 
-  // Sesión única: generamos un id de sesión nuevo y lo persistimos. Pisa el de
-  // cualquier sesión anterior, de modo que el token del dispositivo previo deja
-  // de coincidir y queda invalidado en su próxima petición.
+  // Multi-producto: el acceso se valida POR USUARIO y POR PRODUCTO. El mismo
+  // correo puede tener acceso a varios productos (filas en `usuario_producto`),
+  // pero a CADA producto se entra solo si tiene su fila para ese producto. Así un
+  // usuario creado para el certificado de un cliente NO entra a sistemas-vaxa.
+  // El rol que vale es el que tiene EN ese producto.
+  //
+  // Reglas:
+  //  · Tiene fila para el producto         -> entra, con su rol de ahí.
+  //  · No la tiene pero sí otras            -> está acotado a otros productos -> 403.
+  //  · No tiene ninguna fila (cuenta vieja) -> fallback a nivel empresa (legacy).
+  // Tolerante: si las tablas aún no existen (migración pendiente), no bloquea.
+  let rolEfectivo = usuario.rol_nombre;
+  // ¿La sesión única se maneja a nivel de producto? (true si el usuario tiene su
+  // fila en usuario_producto para este producto). Si no, se usa el modo legacy
+  // por usuario en la tabla `usuarios`.
+  let sesionPorProducto = false;
+  if (dto.producto) {
+    try {
+      const [acceso] = await pool.execute<any[]>(
+        `SELECT r.nombre AS rol_nombre
+         FROM usuario_producto up
+         JOIN productos p ON p.id = up.producto_id
+         JOIN roles r     ON r.id = up.rol_id
+         WHERE up.usuario_id = ? AND p.slug = ? AND up.activo = 1 AND p.activo = 1`,
+        [usuario.id, dto.producto],
+      );
+
+      if (acceso.length) {
+        rolEfectivo = acceso[0].rol_nombre;   // tiene acceso explícito a este producto
+        sesionPorProducto = true;
+      } else {
+        const [otros] = await pool.execute<any[]>(
+          'SELECT 1 FROM usuario_producto WHERE usuario_id = ? AND activo = 1 LIMIT 1',
+          [usuario.id],
+        );
+        if ((otros as any[]).length) {
+          // Está acotado a otros productos, no a éste.
+          throw new AuthError('No tienes acceso a este producto', 403);
+        }
+        // Cuenta sin productos asignados (legacy): permitir si la empresa lo tiene.
+        const [emp] = await pool.execute<any[]>(
+          `SELECT 1 FROM empresa_producto ep JOIN productos p ON p.id = ep.producto_id
+           WHERE ep.empresa_id = ? AND p.slug = ? AND ep.activo = 1 AND p.activo = 1 LIMIT 1`,
+          [usuario.empresa_id, dto.producto],
+        );
+        if (!(emp as any[]).length) {
+          throw new AuthError('No tienes acceso a este producto', 403);
+        }
+      }
+    } catch (err) {
+      if (err instanceof AuthError) throw err;
+      // ER_NO_SUCH_TABLE u otro problema de esquema → migración pendiente: no bloquear.
+      console.warn('[auth] validación de producto omitida (¿migración pendiente?):', (err as Error).message);
+    }
+  }
+
+  // Sesión única POR PRODUCTO: generamos un id de sesión y lo guardamos en la
+  // fila del producto (usuario_producto). Así entrar al MISMO producto desde otro
+  // dispositivo invalida el anterior, pero entrar a OTRO producto con la misma
+  // cuenta NO afecta esta sesión (los diferencia el producto).
+  // Si la cuenta no tiene fila de producto (legacy), se usa usuarios.session_token.
   const sid = randomUUID();
-  await pool.execute('UPDATE usuarios SET session_token = ? WHERE id = ?', [sid, usuario.id]);
+  if (sesionPorProducto && dto.producto) {
+    await pool.execute(
+      `UPDATE usuario_producto up JOIN productos p ON p.id = up.producto_id
+       SET up.session_token = ? WHERE up.usuario_id = ? AND p.slug = ?`,
+      [sid, usuario.id, dto.producto],
+    );
+  } else {
+    await pool.execute('UPDATE usuarios SET session_token = ? WHERE id = ?', [sid, usuario.id]);
+  }
+
+  // Cierre en tiempo real, acotado al mismo producto (null = legacy, afecta todo).
+  revokeOtherSessions(usuario.id, sesionPorProducto ? dto.producto! : null, sid);
 
   const payload: JwtPayload = {
     sub: usuario.id,
     empresa: usuario.tenant_slug,
-    rol: usuario.rol_nombre,
+    rol: rolEfectivo,
+    producto: dto.producto,
     sid,
   };
 
@@ -63,7 +134,7 @@ export async function loginService(dto: LoginDto): Promise<LoginResponse> {
       nombres: usuario.nombres,
       apellidos: usuario.apellidos,
       correo: usuario.correo,
-      rol: usuario.rol_nombre,
+      rol: rolEfectivo,
       empresa: usuario.tenant_slug,
     },
   };

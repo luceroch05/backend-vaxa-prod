@@ -3,9 +3,9 @@ import { loginService, AuthError } from './auth.service';
 import type { LoginDto } from './auth.types';
 
 export async function loginController(req: Request, res: Response): Promise<void> {
-  const { correo, contrasena, empresa } = (req.body ?? {}) as Partial<LoginDto>;
+  const { correo, contrasena, empresa, producto } = (req.body ?? {}) as Partial<LoginDto>;
 
-  console.log('[auth/login] body recibido:', { correo, empresa, contrasena: contrasena ? '***' : '(vacío)' });
+  console.log('[auth/login] body recibido:', { correo, empresa, producto, contrasena: contrasena ? '***' : '(vacío)' });
 
   if (!correo || !contrasena || !empresa) {
     res.status(400).json({
@@ -16,7 +16,7 @@ export async function loginController(req: Request, res: Response): Promise<void
   }
 
   try {
-    const result = await loginService({ correo, contrasena, empresa });
+    const result = await loginService({ correo, contrasena, empresa, producto });
     res.json(result);
   } catch (err) {
     if (err instanceof AuthError) {
