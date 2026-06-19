@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { pool, getEmpresaId } from './db.helper';
 import { creditosRepo } from './creditos.repository';
+import { aTituloNombre } from '../../../shared/text';
 import { pdfService, type PdfDatos } from '../pdf/pdf.service';
 
 import { TipoDocumentoEntity, TipoProgramaEntity, ModalidadEntity } from '../catalogos/catalogo.entity';
@@ -429,7 +430,8 @@ export const participantesRepo = {
     const [result] = await pool().query<any>(
       `INSERT INTO participantes (empresa_id, tipo_documento_id, numero_documento, nombres, apellidos, email, telefono, user_crea_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [empresaId, dto.tipo_documento_id, dto.numero_documento, dto.nombres, dto.apellidos,
+      [empresaId, dto.tipo_documento_id, dto.numero_documento,
+       aTituloNombre(dto.nombres), aTituloNombre(dto.apellidos),
        dto.email ?? null, dto.telefono ?? null, userId ?? null],
     );
     return (await participantesRepo.findById(tenantSlug, result.insertId))!;

@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { adminRepo } from './admin.repository';
+import { sendError } from '../../shared/errors';
 
 const w = (fn: (req: Request, res: Response) => Promise<unknown>) =>
-  (req: Request, res: Response) => fn(req, res).catch((e: Error) => res.status(400).json({ error: e.message }));
+  (req: Request, res: Response) => fn(req, res).catch((e: unknown) => sendError(res, e, 'admin'));
 
 const uid = (req: Request): number | undefined => (req as any).authUser?.sub;
 

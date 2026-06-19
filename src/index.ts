@@ -4,6 +4,7 @@ try { require('dotenv').config(); } catch { /* dotenv ausente en prod: ok */ }
 import * as path from 'path';
 import * as http from 'http';
 import express from 'express';
+import helmet from 'helmet';
 import cors from 'cors';
 import { initSessionSocket } from './realtime/session-socket';
 import { tenantMiddleware } from './middleware/tenant.middleware';
@@ -20,6 +21,7 @@ import { dashboardRoutes } from './modules/dashboard/dashboard.routes';
 import { certificadosRoutes } from './modules/certificados/certificados.routes';
 import { publicCertificadosRoutes } from './modules/certificados/public/public.routes';
 import { validarPublico } from './modules/certificados/emision/emision.controller';
+import { sendError } from './shared/errors';
 
 const app = express();
 
@@ -31,6 +33,38 @@ const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS ?? 'http://localhost:5173')
 // En desarrollo permitimos cualquier puerto de localhost (5173, 5174, etc.) para
 // no romper por el puerto que Vite elija. En producción solo los orígenes de CORS_ORIGINS.
 const IS_PROD = process.env.NODE_ENV === 'production';
+
+// Orígenes para WebSocket (sesión única) derivados de los orígenes HTTP permitidos.
+const WS_ORIGINS = ALLOWED_ORIGINS.map((o) => o.replace(/^http/, 'ws'));
+
+/**
+ * Cabeceras de seguridad (Helmet). La CSP está afinada para NO romper el SPA:
+ *  - scripts/CSS del build de Vite son externos (self), no inline.
+ *  - styleSrc permite 'unsafe-inline' por los estilos en línea de React (style={{}}).
+ *  - Google Fonts (googleapis/gstatic) van explícitos.
+ *  - imágenes/PDFs en data:/blob: (QR, logos embebidos, vista previa de PDF).
+ *  - connectSrc incluye la API y el WebSocket.
+ * crossOriginResourcePolicy = cross-origin: permite que el frontend (otro origen
+ * en dev) cargue los PDFs/imágenes servidos en /uploads.
+ */
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:', 'blob:', ...ALLOWED_ORIGINS],
+      connectSrc: ["'self'", ...ALLOWED_ORIGINS, ...WS_ORIGINS],
+      objectSrc: ["'self'", 'blob:'],
+      frameSrc: ["'self'", 'blob:'],
+      // Forzar https solo en producción (en dev rompería localhost http).
+      upgradeInsecureRequests: IS_PROD ? [] : null,
+    },
+  },
+}));
 
 app.use(cors({
   credentials: true,
@@ -69,7 +103,7 @@ const publicLimiter = rateLimit({
 });
 app.use(`${BASE_PATH}/public/certificados`, publicLimiter, publicCertificadosRoutes);
 app.get(`${BASE_PATH}/public/certificado/:codigo`, publicLimiter,
-  (req, res) => validarPublico(req as any, res).catch((e: Error) => res.status(500).json({ error: e.message })),
+  (req, res) => validarPublico(req as any, res).catch((e: unknown) => sendError(res, e, 'public/certificado')),
 );
 
 /** Certificados: JWT + verificación de que el tenant del token == x-tenant-id */

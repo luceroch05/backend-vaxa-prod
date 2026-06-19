@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { creditosRepo } from '../certificados/shared/creditos.repository';
+import { sendError } from '../../shared/errors';
 
 const w = (fn: (req: Request, res: Response) => Promise<unknown>) =>
-  (req: Request, res: Response) => fn(req, res).catch((e: Error) => res.status(500).json({ error: e.message }));
+  (req: Request, res: Response) => fn(req, res).catch((e: unknown) => sendError(res, e, 'admin/creditos'));
 
 const uid = (req: Request): number | undefined => (req as any).authUser?.sub;
 

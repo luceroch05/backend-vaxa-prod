@@ -1,7 +1,8 @@
 import type { Request, Response } from 'express';
+import { sendError } from '../../../shared/errors';
 
 export const w = (fn: Function) => (req: any, res: any) =>
-  fn(req, res).catch((e: Error) => res.status(500).json({ error: e.message }));
+  fn(req, res).catch((e: unknown) => sendError(res, e, 'certificados'));
 
 /** Lee el tenant slug del header x-tenant-id (sin depender del tenantMiddleware). */
 export const tid = (req: Request): string => {
