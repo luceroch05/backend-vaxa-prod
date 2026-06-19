@@ -13,6 +13,7 @@ import { listCertificados, generarCertificado, anularCertificado, eliminarCertif
 import { listUnidades, createUnidad, updateUnidad, deleteUnidad } from './unidades/unidad.controller';
 import { getNotasGrupo, guardarNotas } from './notas/nota.controller';
 import { getCreditos, getMovimientos } from './creditos/credito.controller';
+import { listPlanes, getEstadoPlan } from './planes/plan.controller';
 
 const router = Router();
 
@@ -78,8 +79,12 @@ router.patch('/emision/:id/anular',             w(anularCertificado));
 router.delete('/emision/:id',                   w(eliminarCertificado));     // elimina y DEVUELVE crédito
 router.post('/emision/:id/regenerar-pdf',       w(regenerarPDF));
 
-// Creditos (saldo de la propia empresa)
+// Creditos (saldo de la propia empresa) — LEGACY, en proceso de retiro hacia planes.
 router.get('/creditos',                         w(getCreditos));
 router.get('/creditos/movimientos',             w(getMovimientos));
+
+// Planes (suscripción + cupo mensual de la propia empresa)
+router.get('/planes',                           w(listPlanes));              // catálogo
+router.get('/planes/estado',                    w(getEstadoPlan));           // plan vigente + consumo del mes
 
 export const certificadosRoutes = router;

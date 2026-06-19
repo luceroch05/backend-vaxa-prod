@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { pool, getEmpresaId } from './db.helper';
-import { creditosRepo } from './creditos.repository';
+import { planRepo } from '../planes/plan.repository';
 import { aTituloNombre } from '../../../shared/text';
 import { pdfService, type PdfDatos } from '../pdf/pdf.service';
 
@@ -826,9 +826,10 @@ export const emisionRepo = {
 
     const codigo = generarCodigo(empresaId);
 
-    // Transacción: insertar el certificado y descontar 1 crédito de forma atómica.
-    // `consumir` bloquea la fila de la empresa (FOR UPDATE) y lanza SinCreditosError
-    // si el saldo es 0; en ese caso el rollback deshace el INSERT del certificado.
+    // Transacción: insertar el certificado y consumir 1 del cupo del plan de forma atómica.
+    // `consumirCupo` bloquea la fila de consumo del mes (FOR UPDATE) y lanza SinPlanError
+    // si la empresa no tiene suscripción vigente; en ese caso el rollback deshace el INSERT.
+    // Si ya superó el cupo, igual emite pero lo cuenta como excedente (se cobra aparte).
     const conn = await pool().getConnection();
     let certId: number;
     try {
@@ -839,7 +840,7 @@ export const emisionRepo = {
         [empresaId, inscripcionId, codigo, new Date().toISOString().split('T')[0], userId ?? null],
       );
       certId = result.insertId;
-      await creditosRepo.consumir(conn, empresaId, certId, userId);
+      await planRepo.consumirCupo(conn, empresaId);
       await conn.commit();
     } catch (e) {
       await conn.rollback();
@@ -987,7 +988,7 @@ export const emisionRepo = {
   },
 
   /**
-   * Elimina el certificado por completo y DEVUELVE 1 crédito al saldo.
+   * Elimina el certificado por completo y DEVUELVE 1 al cupo del mes.
    * (Anular solo desactiva; eliminar libera el cupo). Borra también el PDF físico.
    */
   async eliminar(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
@@ -1004,7 +1005,7 @@ export const emisionRepo = {
       const urlRel: string | null = (rows as any[])[0].url ?? null;
 
       await conn.query('DELETE FROM certificados WHERE id = ? AND empresa_id = ?', [id, empresaId]);
-      await creditosRepo.devolver(conn, empresaId, id, userId);
+      await planRepo.devolverCupo(conn, empresaId);
       await conn.commit();
 
       // Borrar el PDF del disco (fuera de la transacción; si falla no afecta el saldo).

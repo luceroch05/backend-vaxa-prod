@@ -1,6 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { getPool } from '../../db/pool';
-import { creditosRepo } from '../certificados/shared/creditos.repository';
+import { planRepo } from '../certificados/planes/plan.repository';
 
 function pool() {
   const p = getPool();
@@ -19,7 +19,8 @@ export interface CrearEmpresaDto {
   dominio?: string;
   ruc?: string;
   logo?: string;            // data URL base64
-  creditos_iniciales?: number;
+  plan_id?: number;         // plan con el que arranca (default: Básico)
+  ciclo_id?: number;        // ciclo de facturación (default: mensual)
 }
 
 export interface EditarEmpresaDto {
@@ -128,9 +129,13 @@ export const adminRepo = {
       console.warn('[admin] no se pudo vincular empresa↔producto (¿migración pendiente?):', (e as Error).message);
     }
 
-    const iniciales = Number(dto.creditos_iniciales) || 0;
-    if (iniciales > 0) {
-      await creditosRepo.recargar(empresaId, iniciales, userId, 'Asignación inicial', 'asignacion');
+    // La empresa arranca con el plan elegido (o Básico por defecto), con suscripción
+    // vigente, así puede emitir desde el primer día. Tolerante si la migración de planes aún no corrió.
+    try {
+      const planId = Number(dto.plan_id) || (await planRepo.getPlanIdBySlug('basico'));
+      if (planId) await planRepo.asignarPlan(empresaId, planId, Number(dto.ciclo_id) || 1);
+    } catch (e) {
+      console.warn('[admin] no se pudo asignar el plan inicial:', (e as Error).message);
     }
 
     const [rows] = await pool().query<any[]>(

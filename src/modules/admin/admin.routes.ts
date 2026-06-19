@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { adminRepo } from './admin.repository';
+import { planRepo } from '../certificados/planes/plan.repository';
 import { sendError } from '../../shared/errors';
 
 const w = (fn: (req: Request, res: Response) => Promise<unknown>) =>
@@ -45,6 +46,24 @@ router.delete('/empresas/:id/usuarios/:usuarioId', w(async (req, res) => {
 /** Roles (para el selector al crear usuario) */
 router.get('/roles', w(async (_req, res) => {
   res.json(await adminRepo.listRoles());
+}));
+
+/** Planes — catálogo (para el selector). */
+router.get('/planes', w(async (_req, res) => {
+  res.json(await planRepo.listPlanes());
+}));
+
+/** Plan vigente + consumo del mes de una empresa (vista Vaxa). */
+router.get('/empresas/:id/plan', w(async (req, res) => {
+  res.json(await planRepo.getEstadoById(Number(req.params.id)));
+}));
+
+/** Asignar / cambiar el plan de una empresa. body: { plan_id, ciclo_id? } */
+router.post('/empresas/:id/plan', w(async (req, res) => {
+  const { plan_id, ciclo_id } = req.body ?? {};
+  if (!plan_id) throw new Error('plan_id es requerido');
+  await planRepo.asignarPlan(Number(req.params.id), Number(plan_id), Number(ciclo_id) || 1);
+  res.json(await planRepo.getEstadoById(Number(req.params.id)));
 }));
 
 export const adminRoutes = router;
