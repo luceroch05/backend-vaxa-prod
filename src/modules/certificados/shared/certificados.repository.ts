@@ -25,7 +25,8 @@ import type { CreateFirmaDto }                         from '../firmas/firma.dto
 import type { UpsertConfigDto }                        from '../config/config.dto';
 import type { CreateUnidadDto, UpdateUnidadDto }        from '../unidades/unidad.dto';
 import type { NotaInput }                               from '../notas/nota.dto';
-
+import archiver = require('archiver');
+import { PassThrough } from 'stream';
 // ============================================================
 // CATALOGOS
 // ============================================================
@@ -1021,6 +1022,83 @@ export const emisionRepo = {
       conn.release();
     }
   },
+
+  async zipGrupo(
+  tenantSlug: string,
+  grupoId: number,
+): Promise<Buffer | null> {
+
+  const empresaId = await getEmpresaId(tenantSlug);
+
+  const [rows] = await pool().query<any[]>(
+    `SELECT
+        c.url,
+        c.codigo_unico,
+        CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre
+     FROM certificados c
+     INNER JOIN inscripciones i
+        ON i.id = c.inscripcion_id
+     INNER JOIN participantes p
+        ON p.id = i.participante_id
+     WHERE i.grupo_id = ?
+       AND c.empresa_id = ?
+       AND c.estado_id = 1
+       AND c.url IS NOT NULL`,
+    [grupoId, empresaId],
+  );
+
+  if (!rows.length) {
+    return null;
+  }
+
+  return new Promise((resolve, reject) => {
+
+    // archiver v8 es ESM y cambió la API: ya no es archiver('zip', …) sino la clase ZipArchive.
+    const archive = new (archiver as any).ZipArchive({
+      zlib: { level: 9 },
+    });
+
+    const stream = new PassThrough();
+    const chunks: Buffer[] = [];
+
+    stream.on('data', (chunk) => {
+      chunks.push(chunk);
+    });
+
+    stream.on('end', () => {
+      resolve(Buffer.concat(chunks));
+    });
+
+    stream.on('error', reject);
+    archive.on('error', reject);
+
+    archive.pipe(stream);
+
+    for (const cert of rows) {
+
+      const pdfPath = path.join(
+        process.cwd(),
+        cert.url.replace(/^\/+/, ''),
+      );
+
+      if (!fs.existsSync(pdfPath)) {
+        continue;
+      }
+
+      const nombreArchivo =
+        `${cert.participante_nombre}`
+          .replace(/[\\/:*?"<>|]/g, '_')
+          .trim() + '.pdf';
+
+      archive.file(pdfPath, {
+        name: nombreArchivo,
+      });
+    }
+
+    archive.finalize();
+  });
+}
+
 };
 
 /* ── Helper: genera el PDF y guarda la URL en BD ────────────── */

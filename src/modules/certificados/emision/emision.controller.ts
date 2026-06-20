@@ -62,4 +62,35 @@ export async function previewCertificado(req: Request, res: Response): Promise<v
     }
     throw e;
   }
+
+
+  
+}
+export async function descargarZipGrupo(
+  req: Request,
+  res: Response,
+): Promise<void> {
+
+  const grupoId = Number(req.params.grupoId);
+
+  const zipBuffer = await emisionService.zipGrupo(
+    tid(req),
+    grupoId,
+  );
+
+  if (!zipBuffer) {
+    res.status(404).json({
+      error: 'No existen certificados para este grupo',
+    });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'application/zip');
+
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="grupo-${grupoId}.zip"`,
+  );
+
+  res.send(zipBuffer);
 }
