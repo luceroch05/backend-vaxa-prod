@@ -37,10 +37,13 @@ export async function getPrograma(req: Request, res: Response): Promise<void> {
 
 export async function createPrograma(req: Request, res: Response): Promise<void> {
   const { tipo_programa_id, nombre, descripcion, horas_academicas } = req.body ?? {};
-  if (!nombre || !tipo_programa_id || !horas_academicas) {
-    res.status(400).json({ error: 'nombre, tipo_programa_id y horas_academicas son requeridos' }); return;
+  if (!nombre || !tipo_programa_id) {
+    res.status(400).json({ error: 'nombre y tipo_programa_id son requeridos' }); return;
   }
-  res.status(201).json(await programaService.create(tid(req), { tipo_programa_id, nombre, descripcion, horas_academicas }));
+  // Las horas académicas son OPCIONALES: si no vienen, se guarda 0.
+  res.status(201).json(await programaService.create(tid(req), {
+    tipo_programa_id, nombre, descripcion, horas_academicas: Number(horas_academicas) || 0,
+  }));
 }
 
 export async function updatePrograma(req: Request, res: Response): Promise<void> {

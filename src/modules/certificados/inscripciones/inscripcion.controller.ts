@@ -52,6 +52,15 @@ export async function eliminarInscripcion(req: Request, res: Response): Promise<
   }
 }
 
+/** Carga masiva por Excel: inscribe (y opcionalmente emite) una lista de participantes a un grupo. */
+export async function importarMasivo(req: Request, res: Response): Promise<void> {
+  const { grupo_id, emitir, participantes } = req.body ?? {};
+  if (!grupo_id || !Array.isArray(participantes) || participantes.length === 0) {
+    res.status(400).json({ error: 'grupo_id y participantes (lista no vacía) son requeridos' }); return;
+  }
+  res.json(await inscripcionService.importarMasivo(tid(req), Number(grupo_id), participantes, !!emitir, uid(req)));
+}
+
 /** Cambia el estado de varias inscripciones a la vez (ej. aprobar todo un grupo sin notas). */
 export async function cambiarEstadoMasivo(req: Request, res: Response): Promise<void> {
   const { ids, estado_id } = req.body ?? {};

@@ -5,7 +5,7 @@ import { getCatalogos }                                              from './cat
 import { listProgramas, getPrograma, createPrograma, updatePrograma, setActivoPrograma, eliminarPrograma } from './programas/programa.controller';
 import { listGrupos, getGrupo, createGrupo, setActivoGrupo, eliminarGrupo }          from './grupos/grupo.controller';
 import { listParticipantes, getParticipante, createParticipante, buscarParticipante, setActivoParticipante, eliminarParticipante, actualizarParticipante } from './participantes/participante.controller';
-import { listInscripciones, createInscripcion, cambiarEstado, cambiarEstadoMasivo, eliminarInscripcion, inscribir } from './inscripciones/inscripcion.controller';
+import { listInscripciones, createInscripcion, cambiarEstado, cambiarEstadoMasivo, eliminarInscripcion, inscribir, importarMasivo } from './inscripciones/inscripcion.controller';
 import { listLogos, createLogo, deleteLogo }                         from './logos/logo.controller';
 import { listFirmas, createFirma, deleteFirma }                      from './firmas/firma.controller';
 import { getConfig, upsertConfig, listGruposConConfig, congelarGrupo, eliminarConfigGrupo } from './config/config.controller';
@@ -48,6 +48,7 @@ router.delete('/participantes/:id',             w(eliminarParticipante));    // 
 router.get('/inscripciones',                    w(listInscripciones));
 router.post('/inscripciones',                   w(createInscripcion));
 router.post('/inscripciones/inscribir',         w(inscribir));               // find-or-create por documento + valida duplicado
+router.post('/inscripciones/importar',          w(importarMasivo));          // carga masiva por Excel (inscribe / opcional emite)
 router.patch('/inscripciones/estado-masivo',    w(cambiarEstadoMasivo));      // aprobar/cambiar varias a la vez
 router.patch('/inscripciones/:id/estado',       w(cambiarEstado));
 router.delete('/inscripciones/:id',             w(eliminarInscripcion));     // borrar inscripción (con protección)

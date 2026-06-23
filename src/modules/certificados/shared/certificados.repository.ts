@@ -720,6 +720,125 @@ export const inscripcionesRepo = {
     return { participante, inscripcion };
   },
 
+  /**
+   * Carga masiva (Excel): por cada fila crea o reutiliza el participante (por
+   * documento) y lo inscribe al grupo. Si `emitir` es true, además aprueba la
+   * inscripción y genera el certificado (consume cupo). Procesa fila por fila y
+   * NO corta todo si una falla: devuelve el resultado de cada una para mostrarlo.
+   *
+   * La emisión masiva aprueba la inscripción directamente (sin pasar por el flujo
+   * de notas) porque es una acción explícita del operador. La validación de
+   * documentos ya inscritos / ya emitidos se hace aquí contra la BD; el Excel no
+   * necesita saberlo.
+   */
+  async importarMasivo(
+    tenantSlug: string,
+    grupoId: number,
+    filas: Array<{ tipo_documento_id: number; numero_documento: string; nombres: string; apellidos: string; email?: string; telefono?: string }>,
+    emitir: boolean,
+    userId?: number,
+  ) {
+    const empresaId = await getEmpresaId(tenantSlug);
+
+    // El grupo debe existir, ser de la empresa y estar activo.
+    const [g] = await pool().query<any[]>(
+      'SELECT id FROM grupos_programas WHERE id = ? AND empresa_id = ? AND activo = 1',
+      [grupoId, empresaId],
+    );
+    if (!(g as any[]).length) throw new Error('Aula no encontrada o inactiva');
+
+    type Estado = 'inscrito' | 'ya_inscrito' | 'emitido' | 'ya_emitido' | 'error';
+    const resultados: Array<{ fila: number; documento: string; nombre: string; estado: Estado; motivo?: string }> = [];
+
+    for (let i = 0; i < filas.length; i++) {
+      const f = filas[i];
+      const doc       = String(f.numero_documento ?? '').trim();
+      const nombres   = String(f.nombres ?? '').trim();
+      const apellidos = String(f.apellidos ?? '').trim();
+      const nombre    = `${nombres} ${apellidos}`.trim();
+      const base      = { fila: i + 2, documento: doc, nombre };   // +2: la fila 1 del Excel es el encabezado
+
+      if (!f.tipo_documento_id || !doc || !nombres || !apellidos) {
+        resultados.push({ ...base, estado: 'error', motivo: 'Faltan datos obligatorios (tipo de documento, documento, nombres y apellidos).' });
+        continue;
+      }
+
+      try {
+        // 1) Participante: reutiliza por documento o lo crea.
+        let participante = await participantesRepo.findByDocumento(tenantSlug, doc, f.tipo_documento_id);
+        if (!participante) {
+          participante = await participantesRepo.create(tenantSlug, {
+            tipo_documento_id: f.tipo_documento_id, numero_documento: doc,
+            nombres, apellidos, email: f.email, telefono: f.telefono,
+          }, userId);
+        }
+
+        // 2) Inscripción: reutiliza la del grupo o la crea.
+        const [insRows] = await pool().query<any[]>(
+          'SELECT id FROM inscripciones WHERE grupo_id = ? AND participante_id = ? AND empresa_id = ? AND estado_id <> 6 LIMIT 1',
+          [grupoId, participante.id, empresaId],
+        );
+        let inscripcionId: number;
+        const yaInscrito = (insRows as any[]).length > 0;
+        if (yaInscrito) {
+          inscripcionId = (insRows as any[])[0].id;
+        } else {
+          const ins = await inscripcionesRepo.create(tenantSlug, {
+            participante_id: participante.id, grupo_id: grupoId,
+            fecha_inscripcion: new Date().toISOString().split('T')[0],
+          }, userId);
+          inscripcionId = ins.id;
+        }
+
+        if (!emitir) {
+          resultados.push({ ...base, estado: yaInscrito ? 'ya_inscrito' : 'inscrito' });
+          continue;
+        }
+
+        // 3) ¿Ya tiene certificado vigente?
+        const [certRows] = await pool().query<any[]>(
+          'SELECT id FROM certificados WHERE inscripcion_id = ? AND estado_id != 2 LIMIT 1',
+          [inscripcionId],
+        );
+        if ((certRows as any[]).length) {
+          resultados.push({ ...base, estado: 'ya_emitido' });
+          continue;
+        }
+
+        // 4) Aprobar + emitir. Si la emisión falla, se revierte la aprobación.
+        try {
+          await pool().query(
+            'UPDATE inscripciones SET estado_id = 3, user_actua_id = ? WHERE id = ? AND empresa_id = ?',
+            [userId ?? null, inscripcionId, empresaId],
+          );
+          await emisionRepo.generar(tenantSlug, inscripcionId, userId);
+          resultados.push({ ...base, estado: 'emitido' });
+        } catch (eEmit) {
+          if (!yaInscrito) {
+            // Recién inscrito en esta carga: lo dejamos como inscrito (estado 1), no aprobado.
+            await pool().query('UPDATE inscripciones SET estado_id = 1 WHERE id = ? AND empresa_id = ?', [inscripcionId, empresaId]);
+          }
+          resultados.push({ ...base, estado: 'error', motivo: (eEmit as Error).message });
+        }
+      } catch (e) {
+        resultados.push({ ...base, estado: 'error', motivo: (e as Error).message });
+      }
+    }
+
+    const cuenta = (k: Estado) => resultados.filter(r => r.estado === k).length;
+    return {
+      resumen: {
+        total:        filas.length,
+        inscritos:    cuenta('inscrito'),
+        ya_inscritos: cuenta('ya_inscrito'),
+        emitidos:     cuenta('emitido'),
+        ya_emitidos:  cuenta('ya_emitido'),
+        errores:      cuenta('error'),
+      },
+      resultados,
+    };
+  },
+
   async cambiarEstado(tenantSlug: string, id: number, estadoId: number, userId?: number): Promise<InscripcionEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
 
