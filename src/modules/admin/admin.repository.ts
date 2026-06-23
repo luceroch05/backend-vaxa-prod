@@ -100,6 +100,67 @@ export const adminRepo = {
     return (rows as any[])[0];
   },
 
+  /**
+   * Elimina una empresa. Si tiene datos asociados (usuarios, programas,
+   * participantes o certificados) NO se borra: se desactiva (activo=0), que es
+   * reversible. Solo si está completamente vacía se elimina de verdad, limpiando
+   * antes sus filas satélite (suscripción, consumo, pagos, dominios, productos).
+   * Nunca elimina la empresa raíz de Vaxa.
+   */
+  async eliminarEmpresa(id: number) {
+    const [exist] = await pool().query<any[]>(
+      'SELECT id, tenant_slug FROM empresas WHERE id = ? LIMIT 1', [id],
+    );
+    if (!(exist as any[]).length) throw new Error('Empresa no encontrada');
+
+    const root = process.env.VAXA_ROOT_TENANT || 'vaxa';
+    if ((exist as any[])[0].tenant_slug === root) {
+      throw new Error('No se puede eliminar la empresa raíz de Vaxa');
+    }
+
+    // ¿Tiene datos reales? Si sí, solo se desactiva (no se pierde nada).
+    const count = async (tabla: string) => {
+      try {
+        const [r] = await pool().query<any[]>(`SELECT COUNT(*) AS n FROM ${tabla} WHERE empresa_id = ?`, [id]);
+        return Number((r as any[])[0]?.n ?? 0);
+      } catch { return 0; }
+    };
+    const conDatos =
+      (await count('usuarios')) +
+      (await count('programas')) +
+      (await count('participantes')) +
+      (await count('certificados'));
+
+    if (conDatos > 0) {
+      await pool().query('UPDATE empresas SET activo = 0 WHERE id = ?', [id]);
+      return { ok: true, modo: 'desactivada' as const };
+    }
+
+    // Empresa vacía: se borra de verdad, limpiando sus filas satélite.
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query('UPDATE empresas SET plan_actual_id = NULL WHERE id = ?', [id]);
+      for (const tabla of [
+        'pagos', 'consumo_mensual', 'empresa_suscripcion', 'empresa_dominios',
+        'empresa_producto', 'creditos_movimientos',
+      ]) {
+        try { await conn.query(`DELETE FROM ${tabla} WHERE empresa_id = ?`, [id]); }
+        catch { /* la tabla puede no existir según las migraciones aplicadas */ }
+      }
+      await conn.query('DELETE FROM empresas WHERE id = ?', [id]);
+      await conn.commit();
+      return { ok: true, modo: 'eliminada' as const };
+    } catch {
+      await conn.rollback();
+      // Si una FK imprevista lo impide, desactivamos para no dejar la empresa a medias.
+      await pool().query('UPDATE empresas SET activo = 0 WHERE id = ?', [id]);
+      return { ok: true, modo: 'desactivada' as const };
+    } finally {
+      conn.release();
+    }
+  },
+
   /** Crea una empresa nueva. Genera slug si no se pasa y valida unicidad. */
   async crearEmpresa(dto: CrearEmpresaDto, userId?: number) {
     const razon = dto.razon_social?.trim();

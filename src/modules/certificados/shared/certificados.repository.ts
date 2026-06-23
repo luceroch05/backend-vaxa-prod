@@ -46,33 +46,76 @@ export const catalogosRepo = {
   },
 };
 
+/** Se lanza cuando no se puede BORRAR algo por datos asociados. El controller la mapea a 409.
+ *  (Hoy el borrado arrastra los certificados, así que normalmente no se usa; queda como
+ *  red de seguridad para errores de integridad inesperados.) */
+export class DatosAsociadosError extends Error {
+  constructor(public detalle: string) {
+    super(`No se puede borrar: tiene ${detalle}.`);
+    this.name = 'DatosAsociadosError';
+  }
+}
+
+/** Borra las filas de certificados dadas, devolviendo 1 de cupo por cada una.
+ *  Devuelve las URLs de los PDFs para eliminarlos del disco tras el commit. */
+async function purgarCerts(conn: any, empresaId: number, certRows: any[]): Promise<string[]> {
+  const urls: string[] = [];
+  for (const c of certRows as any[]) {
+    if (c.url) urls.push(c.url);
+    await conn.query('DELETE FROM certificados WHERE id = ? AND empresa_id = ?', [c.id, empresaId]);
+    await planRepo.devolverCupo(conn, empresaId);   // devuelve el cupo del mes
+  }
+  return urls;
+}
+
+/** Elimina los PDFs del disco (best-effort, fuera de la transacción). */
+function borrarPdfs(urls: string[]): void {
+  for (const u of urls) {
+    try {
+      const abs = path.join(process.cwd(), u.replace(/^\/+/, ''));
+      if (fs.existsSync(abs)) fs.unlinkSync(abs);
+    } catch { /* si no se puede borrar el archivo, no afecta los datos */ }
+  }
+}
+
 // ============================================================
 // PROGRAMAS
 // ============================================================
 export const programasRepo = {
-  async findAll(tenantSlug: string): Promise<ProgramaEntity[]> {
+  async findAll(tenantSlug: string, incluirInactivos = false): Promise<ProgramaEntity[]> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT p.*, tp.nombre AS tipo_programa_nombre
        FROM programas p
        JOIN tipos_programa tp ON tp.id = p.tipo_programa_id
-       WHERE p.empresa_id = ? AND p.activo = 1
-       ORDER BY p.created_at DESC`,
+       WHERE p.empresa_id = ? ${incluirInactivos ? '' : 'AND p.activo = 1'}
+       ORDER BY p.activo DESC, p.created_at DESC`,
       [empresaId],
     );
     return (rows as any[]).map(ProgramaEntity.fromRow);
   },
 
+  // Sin filtro de activo: el admin necesita ver/recuperar también los archivados.
   async findById(tenantSlug: string, id: number): Promise<ProgramaEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT p.*, tp.nombre AS tipo_programa_nombre
        FROM programas p
        JOIN tipos_programa tp ON tp.id = p.tipo_programa_id
-       WHERE p.id = ? AND p.empresa_id = ? AND p.activo = 1`,
+       WHERE p.id = ? AND p.empresa_id = ?`,
       [id, empresaId],
     );
     return rows[0] ? ProgramaEntity.fromRow(rows[0]) : null;
+  },
+
+  /** Activa/desactiva (soft-delete): no borra, solo archiva. */
+  async setActivo(tenantSlug: string, id: number, activo: boolean, userId?: number): Promise<ProgramaEntity | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    await pool().query(
+      'UPDATE programas SET activo = ?, user_actua_id = ? WHERE id = ? AND empresa_id = ?',
+      [activo ? 1 : 0, userId ?? null, id, empresaId],
+    );
+    return programasRepo.findById(tenantSlug, id);
   },
 
   async create(tenantSlug: string, dto: CreateProgramaDto, userId?: number): Promise<ProgramaEntity> {
@@ -101,6 +144,55 @@ export const programasRepo = {
       await pool().query(`UPDATE programas SET ${fields.join(', ')} WHERE id = ? AND empresa_id = ?`, values);
     }
     return programasRepo.findById(tenantSlug, id);
+  },
+
+  /**
+   * BORRA un programa por completo (aulas, inscripciones, notas, unidades y diseño).
+   * Protección: si hay certificados emitidos bajo el programa, NO borra y avisa.
+   */
+  async remove(tenantSlug: string, id: number): Promise<boolean> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const [certs] = await conn.query<any[]>(
+        `SELECT c.id, c.url FROM certificados c
+           JOIN inscripciones i    ON i.id = c.inscripcion_id
+           JOIN grupos_programas g ON g.id = i.grupo_id
+          WHERE g.programa_id = ? AND c.empresa_id = ?`,
+        [id, empresaId],
+      );
+      const urlsCert = await purgarCerts(conn, empresaId, certs as any[]);
+
+      // Diseño del certificado (config + sus logos/firmas).
+      const [cfgs] = await conn.query<any[]>(
+        'SELECT id FROM configuraciones_certificado WHERE empresa_id = ? AND programa_id = ?', [empresaId, id],
+      );
+      for (const c of cfgs as any[]) {
+        await conn.query('DELETE FROM config_logos  WHERE config_id = ?', [c.id]);
+        await conn.query('DELETE FROM config_firmas WHERE config_id = ?', [c.id]);
+      }
+      await conn.query('DELETE FROM configuraciones_certificado WHERE empresa_id = ? AND programa_id = ?', [empresaId, id]);
+
+      // Inscripciones de sus aulas (notas en cascada), luego aulas, unidades y el programa.
+      await conn.query(
+        `DELETE i FROM inscripciones i JOIN grupos_programas g ON g.id = i.grupo_id
+          WHERE g.programa_id = ? AND i.empresa_id = ?`, [id, empresaId],
+      );
+      await conn.query('DELETE FROM grupos_programas WHERE programa_id = ? AND empresa_id = ?', [id, empresaId]);
+      await conn.query('DELETE FROM unidades         WHERE programa_id = ? AND empresa_id = ?', [id, empresaId]);
+      const [r] = await conn.query<any>('DELETE FROM programas WHERE id = ? AND empresa_id = ?', [id, empresaId]);
+
+      await conn.commit();
+      borrarPdfs(urlsCert);
+      return r.affectedRows > 0;
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
   },
 };
 
@@ -343,18 +435,67 @@ export const notasRepo = {
 // GRUPOS
 // ============================================================
 export const gruposRepo = {
-  async findAll(tenantSlug: string): Promise<GrupoEntity[]> {
+  async findAll(tenantSlug: string, incluirInactivos = false): Promise<GrupoEntity[]> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT g.*, p.nombre AS programa_nombre, m.nombre AS modalidad_nombre
        FROM grupos_programas g
        JOIN programas p   ON p.id = g.programa_id
        JOIN modalidades m ON m.id = g.modalidad_id
-       WHERE g.empresa_id = ? AND g.activo = 1
-       ORDER BY g.fecha_inicio DESC`,
+       WHERE g.empresa_id = ? ${incluirInactivos ? '' : 'AND g.activo = 1'}
+       ORDER BY g.activo DESC, g.fecha_inicio DESC`,
       [empresaId],
     );
     return (rows as any[]).map(GrupoEntity.fromRow);
+  },
+
+  /** Activa/desactiva un aula (soft-delete). */
+  async setActivo(tenantSlug: string, id: number, activo: boolean): Promise<GrupoEntity | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    await pool().query(
+      'UPDATE grupos_programas SET activo = ? WHERE id = ? AND empresa_id = ?',
+      [activo ? 1 : 0, id, empresaId],
+    );
+    return gruposRepo.findById(tenantSlug, id);
+  },
+
+  /** BORRA un aula, sus inscripciones/notas y certificados (devuelve cupo + borra PDFs). */
+  async remove(tenantSlug: string, id: number): Promise<boolean> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const [certs] = await conn.query<any[]>(
+        `SELECT c.id, c.url FROM certificados c
+           JOIN inscripciones i ON i.id = c.inscripcion_id
+          WHERE i.grupo_id = ? AND c.empresa_id = ?`,
+        [id, empresaId],
+      );
+      const urlsCert = await purgarCerts(conn, empresaId, certs as any[]);
+
+      // Diseño específico del aula (override).
+      const [cfgs] = await conn.query<any[]>(
+        'SELECT id FROM configuraciones_certificado WHERE empresa_id = ? AND grupo_id = ?', [empresaId, id],
+      );
+      for (const c of cfgs as any[]) {
+        await conn.query('DELETE FROM config_logos  WHERE config_id = ?', [c.id]);
+        await conn.query('DELETE FROM config_firmas WHERE config_id = ?', [c.id]);
+      }
+      await conn.query('DELETE FROM configuraciones_certificado WHERE empresa_id = ? AND grupo_id = ?', [empresaId, id]);
+
+      await conn.query('DELETE FROM inscripciones    WHERE grupo_id = ? AND empresa_id = ?', [id, empresaId]);
+      const [r] = await conn.query<any>('DELETE FROM grupos_programas WHERE id = ? AND empresa_id = ?', [id, empresaId]);
+
+      await conn.commit();
+      borrarPdfs(urlsCert);
+      return r.affectedRows > 0;
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
   },
 
   async findById(tenantSlug: string, id: number): Promise<GrupoEntity | null> {
@@ -387,17 +528,56 @@ export const gruposRepo = {
 // PARTICIPANTES
 // ============================================================
 export const participantesRepo = {
-  async findAll(tenantSlug: string): Promise<ParticipanteEntity[]> {
+  async findAll(tenantSlug: string, incluirInactivos = false): Promise<ParticipanteEntity[]> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT p.*, td.codigo AS tipo_doc_codigo, td.nombre AS tipo_doc_nombre
        FROM participantes p
        JOIN tipos_documento td ON td.id = p.tipo_documento_id
-       WHERE p.empresa_id = ? AND p.activo = 1
-       ORDER BY p.apellidos, p.nombres`,
+       WHERE p.empresa_id = ? ${incluirInactivos ? '' : 'AND p.activo = 1'}
+       ORDER BY p.activo DESC, p.apellidos, p.nombres`,
       [empresaId],
     );
     return (rows as any[]).map(ParticipanteEntity.fromRow);
+  },
+
+  /** Activa/desactiva un estudiante (soft-delete). */
+  async setActivo(tenantSlug: string, id: number, activo: boolean): Promise<ParticipanteEntity | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    await pool().query(
+      'UPDATE participantes SET activo = ? WHERE id = ? AND empresa_id = ?',
+      [activo ? 1 : 0, id, empresaId],
+    );
+    return participantesRepo.findById(tenantSlug, id);
+  },
+
+  /** BORRA un estudiante, sus inscripciones/notas y sus certificados (devuelve cupo + borra PDFs). */
+  async remove(tenantSlug: string, id: number): Promise<boolean> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+
+      const [certs] = await conn.query<any[]>(
+        `SELECT c.id, c.url FROM certificados c
+           JOIN inscripciones i ON i.id = c.inscripcion_id
+          WHERE i.participante_id = ? AND c.empresa_id = ?`,
+        [id, empresaId],
+      );
+      const urls = await purgarCerts(conn, empresaId, certs as any[]);
+
+      await conn.query('DELETE FROM inscripciones WHERE participante_id = ? AND empresa_id = ?', [id, empresaId]);
+      const [r] = await conn.query<any>('DELETE FROM participantes WHERE id = ? AND empresa_id = ?', [id, empresaId]);
+
+      await conn.commit();
+      borrarPdfs(urls);
+      return r.affectedRows > 0;
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
   },
 
   async findById(tenantSlug: string, id: number): Promise<ParticipanteEntity | null> {
@@ -436,6 +616,24 @@ export const participantesRepo = {
        dto.email ?? null, dto.telefono ?? null, userId ?? null],
     );
     return (await participantesRepo.findById(tenantSlug, result.insertId))!;
+  },
+
+  /** Edita los datos de un estudiante. Solo actualiza los campos enviados. */
+  async update(tenantSlug: string, id: number, dto: Partial<CreateParticipanteDto>): Promise<ParticipanteEntity | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const fields: string[] = [];
+    const values: any[]    = [];
+    if (dto.tipo_documento_id !== undefined) { fields.push('tipo_documento_id = ?'); values.push(dto.tipo_documento_id); }
+    if (dto.numero_documento  !== undefined) { fields.push('numero_documento = ?');  values.push(String(dto.numero_documento).trim()); }
+    if (dto.nombres           !== undefined) { fields.push('nombres = ?');           values.push(aTituloNombre(dto.nombres)); }
+    if (dto.apellidos         !== undefined) { fields.push('apellidos = ?');         values.push(aTituloNombre(dto.apellidos)); }
+    if (dto.email             !== undefined) { fields.push('email = ?');             values.push(dto.email || null); }
+    if (dto.telefono          !== undefined) { fields.push('telefono = ?');          values.push(dto.telefono || null); }
+    if (fields.length) {
+      values.push(id, empresaId);
+      await pool().query(`UPDATE participantes SET ${fields.join(', ')} WHERE id = ? AND empresa_id = ?`, values);
+    }
+    return participantesRepo.findById(tenantSlug, id);
   },
 };
 
@@ -557,6 +755,64 @@ export const inscripcionesRepo = {
       [id],
     );
     return rows[0] ? InscripcionEntity.fromRow(rows[0]) : null;
+  },
+
+  /**
+   * Cambia el estado de VARIAS inscripciones a la vez (ej. aprobar a todo un grupo
+   * de un programa por asistencia, sin notas). Aplica el mismo guard que el cambio
+   * individual: Aprobado/Desaprobado a mano solo si NINGÚN programa involucrado usa notas.
+   * Devuelve cuántas filas se actualizaron.
+   */
+  async cambiarEstadoMasivo(tenantSlug: string, ids: number[], estadoId: number, userId?: number): Promise<number> {
+    const idsLimpios = (ids ?? []).map(Number).filter(n => Number.isInteger(n) && n > 0);
+    if (!idsLimpios.length) return 0;
+
+    const empresaId = await getEmpresaId(tenantSlug);
+    const placeholders = idsLimpios.map(() => '?').join(',');
+
+    if (estadoId === 3 || estadoId === 4) {
+      const [u] = await pool().query<any[]>(
+        `SELECT COUNT(*) AS total
+         FROM unidades un
+         JOIN grupos_programas g ON g.programa_id = un.programa_id
+         JOIN inscripciones i    ON i.grupo_id = g.id
+         WHERE i.id IN (${placeholders}) AND i.empresa_id = ? AND un.activo = 1`,
+        [...idsLimpios, empresaId],
+      );
+      if (Number((u as any[])[0]?.total ?? 0) > 0) {
+        throw new Error('Hay programas que usan notas: su aprobación se define al registrar las notas, no manualmente.');
+      }
+    }
+
+    const [upd] = await pool().query<any>(
+      `UPDATE inscripciones SET estado_id = ?, user_actua_id = ?
+       WHERE id IN (${placeholders}) AND empresa_id = ?`,
+      [estadoId, userId ?? null, ...idsLimpios, empresaId],
+    );
+    return upd.affectedRows ?? 0;
+  },
+
+  /** BORRA una inscripción, sus notas (cascada) y su certificado si lo tuviera
+   *  (devolviendo el cupo y eliminando el PDF). */
+  async remove(tenantSlug: string, id: number): Promise<boolean> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      const [certs] = await conn.query<any[]>(
+        'SELECT id, url FROM certificados WHERE inscripcion_id = ? AND empresa_id = ?', [id, empresaId],
+      );
+      const urls = await purgarCerts(conn, empresaId, certs as any[]);
+      const [r] = await conn.query<any>('DELETE FROM inscripciones WHERE id = ? AND empresa_id = ?', [id, empresaId]);
+      await conn.commit();
+      borrarPdfs(urls);
+      return r.affectedRows > 0;
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
   },
 };
 
@@ -955,7 +1211,13 @@ export const emisionRepo = {
     return pdfService.generarBuffer(datos);
   },
 
-  async validarPublico(codigoUnico: string): Promise<CertificadoPublicoEntity | null> {
+  /**
+   * Valida un certificado por su código único, ACOTADO a una empresa (tenant_slug).
+   * Esto impide que el certificado de una empresa se valide desde el slug de otra:
+   * un código emitido por "cueto" solo es válido en /cueto/certificados/validar,
+   * no en /vaxa/... ni en ningún otro tenant.
+   */
+  async validarPublico(codigoUnico: string, tenantSlug: string): Promise<CertificadoPublicoEntity | null> {
     const [rows] = await pool().query<any[]>(
       `SELECT c.codigo_unico, c.fecha_emision, c.url,
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
@@ -973,8 +1235,8 @@ export const emisionRepo = {
        JOIN modalidades m      ON m.id  = g.modalidad_id
        JOIN estado_certificado ec ON ec.id = c.estado_id
        JOIN empresas e         ON e.id  = c.empresa_id
-       WHERE c.codigo_unico = ?`,
-      [codigoUnico],
+       WHERE c.codigo_unico = ? AND e.tenant_slug = ?`,
+      [codigoUnico, tenantSlug.toLowerCase().trim()],
     );
     return rows[0] ? CertificadoPublicoEntity.fromRow(rows[0]) : null;
   },
@@ -1047,59 +1309,72 @@ export const emisionRepo = {
     [grupoId, empresaId],
   );
 
-  if (!rows.length) {
-    return null;
-  }
+  if (!rows.length) return null;
+  return zipearCerts(rows);
+},
 
+/**
+ * Igual que zipGrupo pero por una LISTA explícita de IDs de certificado:
+ * sirve para descargar exactamente lo que el panel tenga filtrado
+ * (por grupo, por nombre/documento, o cualquier combinación).
+ */
+async zipPorIds(tenantSlug: string, ids: number[]): Promise<Buffer | null> {
+  const idsLimpios = (ids ?? []).map(Number).filter(n => Number.isInteger(n) && n > 0);
+  if (!idsLimpios.length) return null;
+
+  const empresaId = await getEmpresaId(tenantSlug);
+  const placeholders = idsLimpios.map(() => '?').join(',');
+
+  const [rows] = await pool().query<any[]>(
+    `SELECT c.url, c.codigo_unico,
+            CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre
+     FROM certificados c
+     INNER JOIN inscripciones i ON i.id = c.inscripcion_id
+     INNER JOIN participantes p ON p.id = i.participante_id
+     WHERE c.id IN (${placeholders})
+       AND c.empresa_id = ?
+       AND c.estado_id = 1
+       AND c.url IS NOT NULL`,
+    [...idsLimpios, empresaId],
+  );
+
+  if (!rows.length) return null;
+  return zipearCerts(rows);
+},
+
+};
+
+/* ── Helper: arma un ZIP en memoria a partir de filas {url, participante_nombre} ── */
+function zipearCerts(rows: any[]): Promise<Buffer | null> {
   return new Promise((resolve, reject) => {
-
     // archiver v8 es ESM y cambió la API: ya no es archiver('zip', …) sino la clase ZipArchive.
-    const archive = new (archiver as any).ZipArchive({
-      zlib: { level: 9 },
-    });
+    const archive = new (archiver as any).ZipArchive({ zlib: { level: 9 } });
 
     const stream = new PassThrough();
     const chunks: Buffer[] = [];
-
-    stream.on('data', (chunk) => {
-      chunks.push(chunk);
-    });
-
-    stream.on('end', () => {
-      resolve(Buffer.concat(chunks));
-    });
-
+    stream.on('data', (chunk) => chunks.push(chunk));
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
     stream.on('error', reject);
     archive.on('error', reject);
-
     archive.pipe(stream);
 
+    // Evita nombres repetidos en el ZIP (dos alumnos con el mismo nombre).
+    const usados = new Map<string, number>();
     for (const cert of rows) {
+      const pdfPath = path.join(process.cwd(), cert.url.replace(/^\/+/, ''));
+      if (!fs.existsSync(pdfPath)) continue;
 
-      const pdfPath = path.join(
-        process.cwd(),
-        cert.url.replace(/^\/+/, ''),
-      );
+      let base = `${cert.participante_nombre}`.replace(/[\\/:*?"<>|]/g, '_').trim() || cert.codigo_unico;
+      const n = usados.get(base) ?? 0;
+      usados.set(base, n + 1);
+      const nombreArchivo = (n === 0 ? base : `${base} (${n + 1})`) + '.pdf';
 
-      if (!fs.existsSync(pdfPath)) {
-        continue;
-      }
-
-      const nombreArchivo =
-        `${cert.participante_nombre}`
-          .replace(/[\\/:*?"<>|]/g, '_')
-          .trim() + '.pdf';
-
-      archive.file(pdfPath, {
-        name: nombreArchivo,
-      });
+      archive.file(pdfPath, { name: nombreArchivo });
     }
 
     archive.finalize();
   });
 }
-
-};
 
 /* ── Helper: genera el PDF y guarda la URL en BD ────────────── */
 /** Arma el objeto PdfDatos a partir de una fila enriquecida (cert o inscripción).

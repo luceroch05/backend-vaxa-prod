@@ -75,7 +75,11 @@ app.use(cors({
     if (!IS_PROD && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
       return callback(null, true);
     }
-    return callback(new Error(`Origen no permitido por CORS: ${origin}`));
+    // Origen NO permitido: se deniega sin lanzar Error. Lanzar aquí hace que
+    // Express loguee todo el stack y responda 500, inundando los logs cuando
+    // alguien abre el front local contra esta API. Con `false` simplemente no se
+    // envían las cabeceras CORS y el navegador bloquea la petición del lado cliente.
+    return callback(null, false);
   },
 }));
 app.use(express.json({ limit: '15mb' }));
@@ -102,7 +106,7 @@ const publicLimiter = rateLimit({
   message: 'Demasiadas peticiones. Espera un momento antes de reintentar.',
 });
 app.use(`${BASE_PATH}/public/certificados`, publicLimiter, publicCertificadosRoutes);
-app.get(`${BASE_PATH}/public/certificado/:codigo`, publicLimiter,
+app.get(`${BASE_PATH}/public/certificado/:tenantSlug/:codigo`, publicLimiter,
   (req, res) => validarPublico(req as any, res).catch((e: unknown) => sendError(res, e, 'public/certificado')),
 );
 
@@ -149,5 +153,5 @@ server.listen(PORT, () => {
   console.log(`Vaxa Back escuchando en http://localhost:${PORT}`);
   console.log(`  Auth:    POST ${BASE_PATH}/api/auth/login`);
   console.log(`  Certs:   ${BASE_PATH}/api/certificados (requiere x-tenant-id + JWT)`);
-  console.log(`  Público: GET ${BASE_PATH}/public/certificado/:codigo`);
+  console.log(`  Público: GET ${BASE_PATH}/public/certificado/:tenantSlug/:codigo`);
 });

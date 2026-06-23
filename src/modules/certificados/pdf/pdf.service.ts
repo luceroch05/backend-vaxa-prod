@@ -340,8 +340,10 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
         // ── FOOTER ───────────────────────────────────────────
         doc.font('Helvetica').fontSize(8).fillColor('#9ca3af')
           .text(`Fecha de emisión: ${fmtFecha(datos.fecha_emision)}`, 30, H - 18, { lineBreak: false });
+        // Atribución fija a Vaxa: en TODOS los certificados, de cualquier empresa,
+        // se indica que el certificado fue generado por Vaxa.
         doc.font('Helvetica').fontSize(8).fillColor('#9ca3af')
-          .text(`Certificado generado por ${datos.empresa_nombre} — Sistema de Certificación`,
+          .text('Certificado generado por Vaxa — Sistema de Certificación',
             0, H - 18, { width: W, align: 'center', lineBreak: false });
 
         // ── PÁGINA 2: ACTA DE NOTAS ───────────────────────────

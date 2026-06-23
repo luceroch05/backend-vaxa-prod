@@ -142,7 +142,8 @@ export const planRepo = {
   async consumirCupo(conn: PoolConnection, empresaId: number): Promise<void> {
     // 1) Plan vigente de la empresa.
     const [sus] = await conn.query<any[]>(
-      `SELECT p.limite_certificados_mes AS cupo, p.precio_certificado_adicional AS precio_extra
+      `SELECT p.limite_certificados_mes AS cupo, p.precio_mensual AS precio_mensual,
+              p.precio_certificado_adicional AS precio_extra
          FROM empresa_suscripcion s
          JOIN planes p ON p.id = s.plan_id
         WHERE s.empresa_id = ? AND s.estado_id = 1
@@ -152,7 +153,12 @@ export const planRepo = {
     );
     if (!sus.length) throw new SinPlanError();
     const cupo        = Number(sus[0].cupo);
-    const precioExtra = Number(sus[0].precio_extra);
+    // Precio del adicional = proporcional al plan (precio mensual ÷ cupo). Así el
+    // excedente cuesta lo mismo por unidad que el plan (ej. 300/100 = 3 c/u). Para
+    // planes de cupo ilimitado/0 se usa el precio fijo del plan como respaldo.
+    const precioExtra = cupo > 0
+      ? Math.round((Number(sus[0].precio_mensual) / cupo) * 100) / 100
+      : Number(sus[0].precio_extra);
 
     // 2) Fila de consumo del mes (la crea con el cupo del plan si no existe) y la bloquea.
     const { anio, mes } = periodoActual();
@@ -183,6 +189,79 @@ export const planRepo = {
   },
 
   /**
+   * Recarga manual de cupo del mes en curso (lado Vaxa): le da a la empresa
+   * `cantidad` certificados más para emitir ESTE mes y deja registrado el cobro
+   * proporcional al plan (precio unitario = precio_mensual ÷ cupo, igual que el
+   * excedente). No es un excedente orgánico: sube `incluidos` para que esas
+   * emisiones entren dentro del cupo, y el cobro queda en `pagos` (concepto
+   * "excedente", estado pendiente). Lanza SinPlanError si no hay plan vigente.
+   */
+  async recargarCupo(
+    empresaId: number,
+    cantidad: number,
+  ): Promise<{ agregados: number; precio_unitario: number; monto: number }> {
+    const n = Math.floor(Number(cantidad));
+    if (!Number.isFinite(n) || n <= 0) throw new Error('La cantidad debe ser un entero mayor a 0');
+
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+
+      // Plan + suscripción vigente (para el precio proporcional y el vínculo del pago).
+      const [sus] = await conn.query<any[]>(
+        `SELECT s.id AS suscripcion_id,
+                p.limite_certificados_mes AS cupo, p.precio_mensual AS precio_mensual,
+                p.precio_certificado_adicional AS precio_extra
+           FROM empresa_suscripcion s
+           JOIN planes p ON p.id = s.plan_id
+          WHERE s.empresa_id = ? AND s.estado_id = 1
+            AND CURDATE() BETWEEN s.fecha_inicio AND s.fecha_fin
+          ORDER BY s.id DESC LIMIT 1`,
+        [empresaId],
+      );
+      if (!sus.length) throw new SinPlanError();
+      const cupo = Number(sus[0].cupo);
+      const precioUnit = cupo > 0
+        ? Math.round((Number(sus[0].precio_mensual) / cupo) * 100) / 100
+        : Number(sus[0].precio_extra);
+      const monto = Math.round(precioUnit * n * 100) / 100;
+
+      // Asegura la fila del mes con el cupo del plan y le suma la recarga a "incluidos".
+      const { anio, mes } = periodoActual();
+      await conn.query(
+        `INSERT INTO consumo_mensual (empresa_id, anio, mes, incluidos)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE id = id`,
+        [empresaId, anio, mes, cupo],
+      );
+      await conn.query(
+        `UPDATE consumo_mensual SET incluidos = incluidos + ?
+          WHERE empresa_id = ? AND anio = ? AND mes = ?`,
+        [n, empresaId, anio, mes],
+      );
+
+      // Deja el cobro registrado (pendiente). Tolerante si la tabla aún no existe.
+      try {
+        await conn.query(
+          `INSERT INTO pagos (empresa_id, suscripcion_id, concepto_id, monto, estado_id)
+           VALUES (?, ?, 3, ?, 1)`,
+          [empresaId, sus[0].suscripcion_id, monto],
+        );
+      } catch (e) {
+        console.warn('[planes] no se pudo registrar el pago de la recarga:', (e as Error).message);
+      }
+
+      await conn.commit();
+      return { agregados: n, precio_unitario: precioUnit, monto };
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+  },
+
+  /**
    * Revierte 1 emisión del mes en curso (al ELIMINAR un certificado).
    * Si la emisión revertida era un excedente, también descuenta el adicional.
    * DEBE correr dentro de una transacción.
@@ -190,7 +269,9 @@ export const planRepo = {
   async devolverCupo(conn: PoolConnection, empresaId: number): Promise<void> {
     const { anio, mes } = periodoActual();
     const [cm] = await conn.query<any[]>(
-      `SELECT cm.id, cm.emitidos, cm.incluidos, p.precio_certificado_adicional AS precio_extra
+      `SELECT cm.id, cm.emitidos, cm.incluidos,
+              p.precio_mensual AS precio_mensual, p.limite_certificados_mes AS cupo_plan,
+              p.precio_certificado_adicional AS precio_extra
          FROM consumo_mensual cm
          LEFT JOIN empresa_suscripcion s
                 ON s.empresa_id = cm.empresa_id AND s.estado_id = 1
@@ -203,7 +284,11 @@ export const planRepo = {
     const row = cm[0];
     // El último emitido fue excedente si los emitidos superaban el cupo.
     const eraExcedente = row.emitidos > Number(row.incluidos);
-    const precioExtra  = Number(row.precio_extra ?? 0);
+    // Mismo proporcional que al cobrar (precio mensual ÷ cupo del plan).
+    const cupoPlan    = Number(row.cupo_plan ?? 0);
+    const precioExtra = cupoPlan > 0
+      ? Math.round((Number(row.precio_mensual) / cupoPlan) * 100) / 100
+      : Number(row.precio_extra ?? 0);
 
     await conn.query(
       `UPDATE consumo_mensual

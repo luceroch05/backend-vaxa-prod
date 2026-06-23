@@ -24,6 +24,16 @@ router.patch('/empresas/:id', w(async (req, res) => {
   res.json(await adminRepo.updateEmpresa(Number(req.params.id), req.body ?? {}));
 }));
 
+router.delete('/empresas/:id', w(async (req, res) => {
+  res.json(await adminRepo.eliminarEmpresa(Number(req.params.id)));
+}));
+
+/** Recarga manual de cupo del mes (cobro proporcional al plan). body: { cantidad } */
+router.post('/empresas/:id/recargar-cupo', w(async (req, res) => {
+  const { cantidad } = req.body ?? {};
+  res.json(await planRepo.recargarCupo(Number(req.params.id), Number(cantidad)));
+}));
+
 /** Usuarios por empresa */
 router.get('/empresas/:id/usuarios', w(async (req, res) => {
   const producto = (req.query.producto as string | undefined)?.trim() || undefined;

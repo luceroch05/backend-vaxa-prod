@@ -1,9 +1,32 @@
 import type { Request, Response } from 'express';
 import { programaService } from './programa.service';
 import { tid } from '../shared/router.helper';
+import { DatosAsociadosError } from '../shared/certificados.repository';
 
 export async function listProgramas(req: Request, res: Response): Promise<void> {
-  res.json(await programaService.listAll(tid(req)));
+  const incluirInactivos = req.query.todos === '1' || req.query.todos === 'true';
+  res.json(await programaService.listAll(tid(req), incluirInactivos));
+}
+
+/** BORRA un programa por completo (con protección de certificados). */
+export async function eliminarPrograma(req: Request, res: Response): Promise<void> {
+  try {
+    const ok = await programaService.remove(tid(req), Number(req.params.id));
+    if (!ok) { res.status(404).json({ error: 'Programa no encontrado' }); return; }
+    res.status(204).send();
+  } catch (e) {
+    if (e instanceof DatosAsociadosError) { res.status(409).json({ error: e.message, code: 'DATOS_ASOCIADOS' }); return; }
+    throw e;
+  }
+}
+
+/** Archiva (desactiva) o reactiva un programa. Body: { activo: boolean }. */
+export async function setActivoPrograma(req: Request, res: Response): Promise<void> {
+  const activo = req.body?.activo !== false;   // por defecto true (reactivar) salvo que manden false
+  const uid = (req as any).authUser?.sub;
+  const prog = await programaService.setActivo(tid(req), Number(req.params.id), activo, uid);
+  if (!prog) { res.status(404).json({ error: 'Programa no encontrado' }); return; }
+  res.json(prog);
 }
 
 export async function getPrograma(req: Request, res: Response): Promise<void> {

@@ -27,19 +27,22 @@ const maskTel = (t?: string | null): string | null =>
 
 /**
  * GET /public/certificados/:tenantSlug/existe
- * Indica si el tenant_slug corresponde a una empresa activa.
- * Lo usa el frontend para no mostrar el login/plataforma de una empresa inexistente.
+ * Indica si el tenant_slug corresponde a una empresa registrada y si está activa.
+ * Devolvemos también las empresas DESACTIVADAS (exists=true, activo=false): así la
+ * validación pública de certificados sigue funcionando para ellas, mientras el
+ * frontend bloquea el login interno y la inscripción a programas.
  */
 router.get('/:tenantSlug/existe', async (req: Request, res: Response) => {
   try {
     const slug = req.params.tenantSlug?.toLowerCase().trim();
     const [rows] = await pool().query<any[]>(
-      'SELECT id, razon_social, logo_url FROM empresas WHERE tenant_slug = ? AND activo = 1 LIMIT 1',
+      'SELECT id, razon_social, logo_url, activo FROM empresas WHERE tenant_slug = ? LIMIT 1',
       [slug],
     );
     const e = (rows as any[])[0];
     res.json({
       exists: !!e,
+      activo: e ? !!e.activo : false,
       razon_social: e?.razon_social ?? null,
       logo_url: e?.logo_url ?? null,
     });

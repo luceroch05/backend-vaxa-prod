@@ -6,4 +6,6 @@ export const inscripcionService = {
   create:        (tenantSlug: string, dto: CreateInscripcionDto, uid?: number)        => inscripcionesRepo.create(tenantSlug, dto, uid),
   inscribir:     (tenantSlug: string, dto: InscribirDto, uid?: number)               => inscripcionesRepo.inscribir(tenantSlug, dto, uid),
   cambiarEstado: (tenantSlug: string, id: number, dto: CambiarEstadoDto, uid?: number) => inscripcionesRepo.cambiarEstado(tenantSlug, id, dto.estado_id, uid),
+  cambiarEstadoMasivo: (tenantSlug: string, ids: number[], estadoId: number, uid?: number) => inscripcionesRepo.cambiarEstadoMasivo(tenantSlug, ids, estadoId, uid),
+  remove:        (tenantSlug: string, id: number)                                    => inscripcionesRepo.remove(tenantSlug, id),
 };

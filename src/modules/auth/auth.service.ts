@@ -15,6 +15,7 @@ interface UsuarioRow {
   rol_nombre: string;
   empresa_id: number;
   tenant_slug: string;
+  empresa_activa: number;
 }
 
 export async function loginService(dto: LoginDto): Promise<LoginResponse> {
@@ -23,7 +24,7 @@ export async function loginService(dto: LoginDto): Promise<LoginResponse> {
 
   const [rows] = await pool.execute<any[]>(
     `SELECT u.id, u.nombres, u.apellidos, u.correo, u.contrasena,
-            r.nombre AS rol_nombre, u.empresa_id, e.tenant_slug
+            r.nombre AS rol_nombre, u.empresa_id, e.tenant_slug, e.activo AS empresa_activa
      FROM usuarios u
      JOIN roles r ON r.id = u.rol_id
      JOIN empresas e ON e.id = u.empresa_id
@@ -40,6 +41,14 @@ export async function loginService(dto: LoginDto): Promise<LoginResponse> {
   const passwordValida = await bcrypt.compare(dto.contrasena, usuario.contrasena);
   if (!passwordValida) {
     throw new AuthError('Credenciales inválidas', 401);
+  }
+
+  // Empresa desactivada: NO puede entrar a gestionar sus certificados (la
+  // validación pública de certificados sí sigue funcionando, en otra ruta).
+  // Se valida tras la contraseña para no revelar el estado de la empresa
+  // a quien no tiene credenciales correctas.
+  if (!usuario.empresa_activa) {
+    throw new AuthError('Esta empresa está desactivada. Contacta con Vaxa para reactivarla.', 403);
   }
 
   // Multi-producto: el acceso se valida POR USUARIO y POR PRODUCTO. El mismo

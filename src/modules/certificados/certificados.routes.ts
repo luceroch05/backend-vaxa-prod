@@ -2,14 +2,14 @@ import { Router } from 'express';
 import { w } from './shared/router.helper';
 
 import { getCatalogos }                                              from './catalogos/catalogo.controller';
-import { listProgramas, getPrograma, createPrograma, updatePrograma } from './programas/programa.controller';
-import { listGrupos, getGrupo, createGrupo }                         from './grupos/grupo.controller';
-import { listParticipantes, getParticipante, createParticipante, buscarParticipante } from './participantes/participante.controller';
-import { listInscripciones, createInscripcion, cambiarEstado, inscribir } from './inscripciones/inscripcion.controller';
+import { listProgramas, getPrograma, createPrograma, updatePrograma, setActivoPrograma, eliminarPrograma } from './programas/programa.controller';
+import { listGrupos, getGrupo, createGrupo, setActivoGrupo, eliminarGrupo }          from './grupos/grupo.controller';
+import { listParticipantes, getParticipante, createParticipante, buscarParticipante, setActivoParticipante, eliminarParticipante, actualizarParticipante } from './participantes/participante.controller';
+import { listInscripciones, createInscripcion, cambiarEstado, cambiarEstadoMasivo, eliminarInscripcion, inscribir } from './inscripciones/inscripcion.controller';
 import { listLogos, createLogo, deleteLogo }                         from './logos/logo.controller';
 import { listFirmas, createFirma, deleteFirma }                      from './firmas/firma.controller';
 import { getConfig, upsertConfig, listGruposConConfig, congelarGrupo, eliminarConfigGrupo } from './config/config.controller';
-import { listCertificados, generarCertificado, anularCertificado, eliminarCertificado, regenerarPDF, previewCertificado,descargarZipGrupo, } from './emision/emision.controller';
+import { listCertificados, generarCertificado, anularCertificado, eliminarCertificado, regenerarPDF, previewCertificado,descargarZipGrupo, descargarZipPorIds, } from './emision/emision.controller';
 import { listUnidades, createUnidad, updateUnidad, deleteUnidad } from './unidades/unidad.controller';
 import { getNotasGrupo, guardarNotas } from './notas/nota.controller';
 import { getCreditos, getMovimientos } from './creditos/credito.controller';
@@ -24,24 +24,33 @@ router.get('/catalogos',                        w(getCatalogos));
 router.get('/programas',                        w(listProgramas));
 router.get('/programas/:id',                    w(getPrograma));
 router.post('/programas',                       w(createPrograma));
+router.patch('/programas/:id/activo',           w(setActivoPrograma));       // archivar/reactivar
+router.delete('/programas/:id',                 w(eliminarPrograma));        // borrar (con protección)
 router.patch('/programas/:id',                  w(updatePrograma));
 
 // Grupos
 router.get('/grupos',                           w(listGrupos));
 router.get('/grupos/:id',                       w(getGrupo));
 router.post('/grupos',                          w(createGrupo));
+router.patch('/grupos/:id/activo',              w(setActivoGrupo));          // archivar/reactivar aula
+router.delete('/grupos/:id',                    w(eliminarGrupo));           // borrar aula (con protección)
 
 // Participantes
 router.get('/participantes',                    w(listParticipantes));
 router.get('/participantes/buscar',             w(buscarParticipante));      // ?documento=XXXX (autocompletar)
 router.get('/participantes/:id',                w(getParticipante));
 router.post('/participantes',                   w(createParticipante));
+router.patch('/participantes/:id/activo',       w(setActivoParticipante));   // archivar/reactivar estudiante
+router.patch('/participantes/:id',              w(actualizarParticipante));  // editar datos del estudiante
+router.delete('/participantes/:id',             w(eliminarParticipante));    // borrar estudiante (con protección)
 
 // Inscripciones
 router.get('/inscripciones',                    w(listInscripciones));
 router.post('/inscripciones',                   w(createInscripcion));
 router.post('/inscripciones/inscribir',         w(inscribir));               // find-or-create por documento + valida duplicado
+router.patch('/inscripciones/estado-masivo',    w(cambiarEstadoMasivo));      // aprobar/cambiar varias a la vez
 router.patch('/inscripciones/:id/estado',       w(cambiarEstado));
+router.delete('/inscripciones/:id',             w(eliminarInscripcion));     // borrar inscripción (con protección)
 
 // Logos
 router.get('/logos',                            w(listLogos));
@@ -80,6 +89,7 @@ router.delete('/emision/:id',                   w(eliminarCertificado));     // 
 router.post('/emision/:id/regenerar-pdf',       w(regenerarPDF));
 router.get('/emision/grupo/:grupoId/zip',w(descargarZipGrupo),
 );
+router.post('/emision/zip',                     w(descargarZipPorIds));       // ZIP de una lista de IDs (lo filtrado)
 // Creditos (saldo de la propia empresa) — LEGACY, en proceso de retiro hacia planes.
 router.get('/creditos',                         w(getCreditos));
 router.get('/creditos/movimientos',             w(getMovimientos));

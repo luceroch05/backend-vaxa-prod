@@ -23,7 +23,9 @@ export async function generarCertificado(req: Request, res: Response): Promise<v
 }
 
 export async function validarPublico(req: Request, res: Response): Promise<void> {
-  const cert = await emisionService.validarPublico(req.params.codigo);
+  const tenantSlug = req.params.tenantSlug;
+  if (!tenantSlug) { res.status(400).json({ error: 'Empresa requerida' }); return; }
+  const cert = await emisionService.validarPublico(req.params.codigo, tenantSlug);
   if (!cert) { res.status(404).json({ error: 'Certificado no encontrado' }); return; }
   res.json(cert);
 }
@@ -92,5 +94,21 @@ export async function descargarZipGrupo(
     `attachment; filename="grupo-${grupoId}.zip"`,
   );
 
+  res.send(zipBuffer);
+}
+
+/** Descarga en ZIP los certificados de una lista de IDs (lo que el panel tenga filtrado). */
+export async function descargarZipPorIds(req: Request, res: Response): Promise<void> {
+  const ids: number[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
+
+  const zipBuffer = await emisionService.zipPorIds(tid(req), ids);
+
+  if (!zipBuffer) {
+    res.status(404).json({ error: 'No hay certificados para descargar' });
+    return;
+  }
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', 'attachment; filename="certificados.zip"');
   res.send(zipBuffer);
 }
