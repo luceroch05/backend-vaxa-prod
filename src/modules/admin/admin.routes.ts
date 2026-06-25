@@ -2,6 +2,9 @@ import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { adminRepo } from './admin.repository';
 import { planRepo } from '../certificados/planes/plan.repository';
+import { comprobanteRepo } from '../facturacion/comprobante.repository';
+import { consultarRuc } from '../facturacion/consulta-ruc.service';
+import { generarPdf } from '../facturacion/pdf.service';
 import { sendError } from '../../shared/errors';
 
 const w = (fn: (req: Request, res: Response) => Promise<unknown>) =>
@@ -32,6 +35,111 @@ router.delete('/empresas/:id', w(async (req, res) => {
 router.post('/empresas/:id/recargar-cupo', w(async (req, res) => {
   const { cantidad } = req.body ?? {};
   res.json(await planRepo.recargarCupo(Number(req.params.id), Number(cantidad)));
+}));
+
+/** Control de cobranza: todas las empresas con su vencimiento y semáforo. */
+router.get('/cobranza', w(async (_req, res) => {
+  res.json(await planRepo.listVencimientos());
+}));
+
+/** Marca el ciclo como pagado y renueva el vencimiento.
+ *  body: { monto?, fecha_pago?, comprobante_tipo_id?, comprobante_numero? } */
+router.post('/empresas/:id/marcar-pagado', w(async (req, res) => {
+  res.json(await planRepo.marcarPagado(Number(req.params.id), req.body ?? {}));
+}));
+
+/** Historial de pagos de una empresa. */
+router.get('/empresas/:id/pagos', w(async (req, res) => {
+  res.json(await planRepo.listPagos(Number(req.params.id)));
+}));
+
+/** ── Facturación electrónica ──────────────────────────────── */
+
+/** Lista de comprobantes emitidos. */
+router.get('/comprobantes', w(async (_req, res) => {
+  res.json(await comprobanteRepo.list());
+}));
+
+/** Detalle de un comprobante. */
+router.get('/comprobantes/:id', w(async (req, res) => {
+  const c = await comprobanteRepo.getById(Number(req.params.id));
+  if (!c) { res.status(404).json({ error: 'Comprobante no encontrado' }); return; }
+  res.json(c);
+}));
+
+/** Emite la factura de un pago ya registrado (plan o certificados adicionales). */
+router.post('/pagos/:id/comprobante', w(async (req, res) => {
+  res.json(await comprobanteRepo.emitirDesdePago(Number(req.params.id)));
+}));
+
+/** Registra una venta (líneas libres + descuento → pago + comprobante + créditos/renovación). */
+router.post('/empresas/:id/venta', w(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await comprobanteRepo.registrarVenta({
+    empresaId: Number(req.params.id),
+    items: Array.isArray(b.items) ? b.items : [],
+    descuento: b.descuento && Number(b.descuento.valor) > 0
+      ? { tipo: b.descuento.tipo === 'pct' ? 'pct' : 'monto', valor: Number(b.descuento.valor) }
+      : undefined,
+    tipoComprobante: b.tipo_comprobante,
+  }));
+}));
+
+/** Verifica un RUC en SUNAT (dato público) y devuelve razón social + estado. */
+router.get('/consulta/ruc/:ruc', w(async (req, res) => {
+  res.json(await consultarRuc(req.params.ruc));
+}));
+
+/** Venta a cliente MANUAL (DNI/CE/sin doc), sin empresa. Solo boleta (03) o nota de venta (NV). */
+router.post('/comprobantes/venta-manual', w(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await comprobanteRepo.registrarVentaManual({
+    cliente: b.cliente,
+    items: Array.isArray(b.items) ? b.items : [],
+    descuento: b.descuento && Number(b.descuento.valor) > 0
+      ? { tipo: b.descuento.tipo === 'pct' ? 'pct' : 'monto', valor: Number(b.descuento.valor) }
+      : undefined,
+    tipoComprobante: b.tipo_comprobante === 'NV' ? 'NV' : '03',
+  }));
+}));
+
+/** Emite un comprobante (lo envía a SUNAT). body: { empresa_id, tipo_comprobante?, items, pago_id?, cliente? } */
+router.post('/comprobantes', w(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await comprobanteRepo.emitir({
+    empresaId: Number(b.empresa_id),
+    tipoComprobante: b.tipo_comprobante,
+    pagoId: b.pago_id ?? null,
+    items: b.items ?? [],
+    cliente: b.cliente,
+  }));
+}));
+
+/** Emite una nota de crédito/débito sobre un comprobante. body: { tipo_nota, motivo_codigo, motivo_descripcion } */
+router.post('/comprobantes/:id/nota', w(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await comprobanteRepo.emitirNota({
+    comprobanteOrigenId: Number(req.params.id),
+    tipoNota: b.tipo_nota,
+    motivoCodigo: b.motivo_codigo,
+    motivoDescripcion: b.motivo_descripcion,
+  }));
+}));
+
+/** Descarga el XML firmado o el CDR. ?tipo=xml|cdr */
+router.get('/comprobantes/:id/archivo', w(async (req, res) => {
+  const cual = (req.query.tipo === 'cdr' ? 'cdr' : 'xml') as 'xml' | 'cdr';
+  const xml = await comprobanteRepo.getXml(Number(req.params.id), cual);
+  if (!xml) { res.status(404).json({ error: 'Archivo no disponible' }); return; }
+  res.json({ xml });
+}));
+
+/** PDF (representación impresa) en base64. */
+router.get('/comprobantes/:id/pdf', w(async (req, res) => {
+  const c = await comprobanteRepo.getById(Number(req.params.id));
+  if (!c) { res.status(404).json({ error: 'Comprobante no encontrado' }); return; }
+  const pdf = await generarPdf(c);
+  res.json({ nombre: `${c.numero}.pdf`, pdf_base64: pdf.toString('base64') });
 }));
 
 /** Usuarios por empresa */

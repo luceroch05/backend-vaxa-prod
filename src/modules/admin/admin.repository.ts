@@ -18,6 +18,7 @@ export interface CrearEmpresaDto {
   tenant_slug?: string;
   dominio?: string;
   ruc?: string;
+  tipo_doc?: string;        // cat.06: '6' RUC (default) · '1' DNI · '4' CE · '7' pasaporte
   logo?: string;            // data URL base64
   plan_id?: number;         // plan con el que arranca (default: Básico)
   ciclo_id?: number;        // ciclo de facturación (default: mensual)
@@ -28,6 +29,7 @@ export interface EditarEmpresaDto {
   tenant_slug?: string;
   dominio?: string;
   ruc?: string;
+  tipo_doc?: string;
   logo?: string;            // data URL base64; '' para quitar
   activo?: boolean;
 }
@@ -54,7 +56,7 @@ export const adminRepo = {
   /** Empresas con saldo y consumo (para el panel de Vaxa). */
   async listEmpresas() {
     const [rows] = await pool().query<any[]>(
-      `SELECT id, razon_social, tenant_slug, dominio, ruc, logo_url, activo,
+      `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo,
               creditos_disponibles, creditos_asignados_total,
               (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
        FROM empresas ORDER BY razon_social`,
@@ -83,6 +85,7 @@ export const adminRepo = {
     }
     if (dto.dominio !== undefined) { fields.push('dominio = ?'); values.push(dto.dominio.trim() || null); }
     if (dto.ruc !== undefined)     { fields.push('ruc = ?');     values.push(dto.ruc.trim() || null); }
+    if (dto.tipo_doc !== undefined){ fields.push('tipo_doc = ?'); values.push(dto.tipo_doc || '6'); }
     if (dto.logo !== undefined)    { fields.push('logo_url = ?'); values.push(dto.logo || null); }
     if (dto.activo !== undefined)  { fields.push('activo = ?');  values.push(dto.activo ? 1 : 0); }
 
@@ -92,7 +95,7 @@ export const adminRepo = {
     }
 
     const [rows] = await pool().query<any[]>(
-      `SELECT id, razon_social, tenant_slug, dominio, ruc, logo_url, activo,
+      `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo,
               creditos_disponibles, creditos_asignados_total,
               (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
        FROM empresas WHERE id = ?`, [id],
@@ -172,9 +175,17 @@ export const adminRepo = {
     const [dup] = await pool().query<any[]>('SELECT id FROM empresas WHERE tenant_slug = ? LIMIT 1', [slug]);
     if ((dup as any[]).length) throw new Error(`Ya existe una empresa con el identificador "${slug}"`);
 
+    const docNum = dto.ruc?.trim();
+    if (docNum) {
+      const [dupRuc] = await pool().query<any[]>('SELECT razon_social FROM empresas WHERE ruc = ? LIMIT 1', [docNum]);
+      if ((dupRuc as any[]).length) {
+        throw new Error(`Ya existe una empresa registrada con el documento ${docNum} (${dupRuc[0].razon_social}).`);
+      }
+    }
+
     const [res] = await pool().query<any>(
-      `INSERT INTO empresas (razon_social, tenant_slug, dominio, ruc, logo_url, activo) VALUES (?, ?, ?, ?, ?, 1)`,
-      [razon, slug, dto.dominio?.trim() || null, dto.ruc?.trim() || null, dto.logo || null],
+      `INSERT INTO empresas (razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo) VALUES (?, ?, ?, ?, ?, ?, 1)`,
+      [razon, slug, dto.dominio?.trim() || null, dto.ruc?.trim() || null, dto.tipo_doc || '6', dto.logo || null],
     );
     const empresaId = res.insertId as number;
 
@@ -194,9 +205,28 @@ export const adminRepo = {
     // vigente, así puede emitir desde el primer día. Tolerante si la migración de planes aún no corrió.
     try {
       const planId = Number(dto.plan_id) || (await planRepo.getPlanIdBySlug('basico'));
-      if (planId) await planRepo.asignarPlan(empresaId, planId, Number(dto.ciclo_id) || 1);
+      if (planId) {
+        await planRepo.asignarPlan(empresaId, planId, Number(dto.ciclo_id) || 1);
+        // Créditos incluidos del plan → saldo inicial de la empresa (acumulables).
+        const [pl] = await pool().query<any[]>('SELECT creditos_incluidos FROM planes WHERE id = ?', [planId]);
+        const incluidos = Number((pl as any[])[0]?.creditos_incluidos ?? 0);
+        if (incluidos > 0) {
+          await pool().query(
+            `UPDATE empresas
+                SET creditos_disponibles = creditos_disponibles + ?,
+                    creditos_asignados_total = creditos_asignados_total + ?
+              WHERE id = ?`,
+            [incluidos, incluidos, empresaId],
+          );
+          await pool().query(
+            `INSERT INTO creditos_movimientos (empresa_id, tipo, cantidad, saldo_resultante, descripcion, user_crea_id)
+             VALUES (?, 'asignacion', ?, ?, 'Créditos incluidos del plan', ?)`,
+            [empresaId, incluidos, incluidos, userId ?? null],
+          );
+        }
+      }
     } catch (e) {
-      console.warn('[admin] no se pudo asignar el plan inicial:', (e as Error).message);
+      console.warn('[admin] no se pudo asignar el plan inicial / créditos:', (e as Error).message);
     }
 
     const [rows] = await pool().query<any[]>(

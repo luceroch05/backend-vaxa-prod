@@ -3,10 +3,14 @@ export interface Plan {
   id: number;
   slug: string;
   nombre: string;
-  precio_mensual: number;
+  precio_mensual: number;            // = mantenimiento mensual
+  implementacion: number;            // pago único de activación
+  mantenimiento_mensual: number;
+  creditos_incluidos: number;
+  usuarios_incluidos: number;        // 0 = ilimitado
   limite_certificados_mes: number;
   precio_certificado_adicional: number;
-  setup_inicial: number;
+  setup_inicial: number;             // = implementación
   permite_diseno: boolean;
   permite_subdominio: boolean;
   permite_api: boolean;
@@ -25,6 +29,10 @@ export const PlanEntity = {
       slug:                         r.slug,
       nombre:                       r.nombre,
       precio_mensual:               Number(r.precio_mensual),
+      implementacion:               Number(r.implementacion ?? 0),
+      mantenimiento_mensual:        Number(r.mantenimiento_mensual ?? 0),
+      creditos_incluidos:           Number(r.creditos_incluidos ?? 0),
+      usuarios_incluidos:           Number(r.usuarios_incluidos ?? 1),
       limite_certificados_mes:      r.limite_certificados_mes,
       precio_certificado_adicional: Number(r.precio_certificado_adicional),
       setup_inicial:                Number(r.setup_inicial),
@@ -52,15 +60,33 @@ export interface ConsumoMes {
   restantes: number;        // cupo libre = max(incluidos - emitidos, 0)
 }
 
+/** Semáforo de cobranza según qué tan cerca está el vencimiento. */
+export type EstadoCobranza = 'vigente' | 'por_vencer' | 'vencido';
+
+/** Datos de vencimiento/cobranza derivados de fecha_fin (no se almacenan). */
+export interface Cobranza {
+  fecha_limite_pago: string;       // fecha máxima para pagar = el mismo día de vencimiento (fecha_fin)
+  dias_para_vencer: number;        // días desde hoy hasta fecha_fin (negativo si ya venció)
+  estado_cobranza: EstadoCobranza; // vigente | por_vencer | vencido
+}
+
 /** Estado del plan de una empresa: suscripción vigente + consumo del mes. */
+/** Saldo de créditos de la empresa (modelo créditos + mantenimiento). */
+export interface CreditosSaldo {
+  disponibles: number;   // saldo actual para emitir
+  asignados: number;     // total histórico asignado
+  consumidos: number;    // asignados - disponibles
+}
+
 export interface EstadoPlan {
   plan: Plan | null;
-  suscripcion: {
+  suscripcion: ({
     id: number;
     ciclo: string;
     estado: string;
     fecha_inicio: string;
     fecha_fin: string;
-  } | null;
+  } & Cobranza) | null;
   consumo: ConsumoMes;
+  creditos: CreditosSaldo;
 }

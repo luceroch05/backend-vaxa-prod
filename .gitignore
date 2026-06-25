@@ -2,3 +2,8 @@ node_modules/
 dist/
 .env
 *.log
+
+# Certificados y secretos de facturación electrónica (NUNCA subir)
+secrets/
+*.pfx
+*.p12
