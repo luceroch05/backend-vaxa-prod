@@ -31,10 +31,14 @@ router.delete('/empresas/:id', w(async (req, res) => {
   res.json(await adminRepo.eliminarEmpresa(Number(req.params.id)));
 }));
 
-/** Recarga manual de cupo del mes (cobro proporcional al plan). body: { cantidad } */
+/** Recarga manual de créditos. body: { cantidad, monto? } — monto opcional para paquetes con descuento. */
 router.post('/empresas/:id/recargar-cupo', w(async (req, res) => {
-  const { cantidad } = req.body ?? {};
-  res.json(await planRepo.recargarCupo(Number(req.params.id), Number(cantidad)));
+  const { cantidad, monto } = req.body ?? {};
+  res.json(await planRepo.recargarCupo(
+    Number(req.params.id),
+    Number(cantidad),
+    monto != null ? Number(monto) : undefined,
+  ));
 }));
 
 /** Control de cobranza: todas las empresas con su vencimiento y semáforo. */

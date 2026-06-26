@@ -75,6 +75,21 @@ function periodoActual(): { anio: number; mes: number } {
   return { anio: now.getFullYear(), mes: now.getMonth() + 1 };
 }
 
+/**
+ * ¿El plan vigente de la empresa es ILIMITADO? Convención: `creditos_incluidos = 0`
+ * (ej. Corporativo). En ese caso la emisión no consume ni se bloquea por saldo.
+ */
+async function planEsIlimitado(conn: PoolConnection, empresaId: number): Promise<boolean> {
+  const [rows] = await conn.query<any[]>(
+    `SELECT p.creditos_incluidos
+       FROM empresas e
+       JOIN planes p ON p.id = e.plan_actual_id
+      WHERE e.id = ?`,
+    [empresaId],
+  );
+  return rows.length > 0 && Number(rows[0].creditos_incluidos) === 0;
+}
+
 export const planRepo = {
   /** Catálogo de planes activos (ordenados). */
   async listPlanes(): Promise<Plan[]> {
@@ -182,7 +197,20 @@ export const planRepo = {
     );
     const disponibles = Number(emp[0]?.creditos_disponibles ?? 0);
     const asignados   = Number(emp[0]?.creditos_asignados_total ?? 0);
-    const creditos: CreditosSaldo = { disponibles, asignados, consumidos: Math.max(asignados - disponibles, 0) };
+    // Total comprado aparte (recargas), independiente del límite del historial.
+    const [rec] = await pool().query<any[]>(
+      `SELECT COALESCE(SUM(cantidad), 0) AS recargados
+         FROM creditos_movimientos WHERE empresa_id = ? AND tipo = 'recarga'`,
+      [empresaId],
+    );
+    const recargados = Number(rec[0]?.recargados ?? 0);
+    const creditos: CreditosSaldo = {
+      disponibles, asignados,
+      consumidos: Math.max(asignados - disponibles, 0),
+      recargados,
+      // Plan ilimitado (creditos_incluidos = 0, ej. Corporativo): emite sin tope.
+      ilimitado: !!plan && Number(plan.creditos_incluidos) === 0,
+    };
 
     return {
       plan,
@@ -209,6 +237,12 @@ export const planRepo = {
    * Lanza SinPlanError si la empresa no tiene suscripción vigente.
    */
   async consumirCupo(conn: PoolConnection, empresaId: number): Promise<void> {
+    // Plan ILIMITADO (creditos_incluidos = 0, ej. Corporativo): NO se bloquea por
+    // saldo, pero SÍ se registra el consumo (decrementa + movimiento) para tener
+    // seguimiento de cuántos certificados emite (el saldo puede quedar negativo;
+    // en la UI se muestra ∞, nunca el número). En planes normales sí bloquea.
+    const ilimitado = await planEsIlimitado(conn, empresaId);
+
     // Modelo de CRÉDITOS: cada certificado consume 1 crédito del saldo de la
     // empresa. Bloquea la fila (FOR UPDATE) para evitar carreras. Sin saldo → 409.
     const [rows] = await conn.query<any[]>(
@@ -217,7 +251,7 @@ export const planRepo = {
     );
     if (!rows.length) throw new SinPlanError();
     const saldo = Number(rows[0].creditos_disponibles ?? 0);
-    if (saldo <= 0) throw new SinCreditosError();
+    if (!ilimitado && saldo <= 0) throw new SinCreditosError();
 
     const nuevo = saldo - 1;
     await conn.query('UPDATE empresas SET creditos_disponibles = ? WHERE id = ?', [nuevo, empresaId]);
@@ -236,12 +270,18 @@ export const planRepo = {
   async recargarCupo(
     empresaId: number,
     cantidad: number,
+    montoOverride?: number,
   ): Promise<{ agregados: number; precio_unitario: number; monto: number }> {
     const n = Math.floor(Number(cantidad));
     if (!Number.isFinite(n) || n <= 0) throw new Error('La cantidad debe ser un entero mayor a 0');
 
-    const PRECIO_CREDITO = 2.70;  // incluye IGV
-    const monto = Math.round(PRECIO_CREDITO * n * 100) / 100;
+    const PRECIO_CREDITO = 2.70;  // incluye IGV (precio por crédito suelto)
+    // Si se pasa un monto total (ej. precio de paquete con descuento: 300→S/750,
+    // 700→S/1500), se cobra ese; si no, se cobra al precio por crédito suelto.
+    const monto = (montoOverride != null && Number.isFinite(Number(montoOverride)) && Number(montoOverride) >= 0)
+      ? Math.round(Number(montoOverride) * 100) / 100
+      : Math.round(PRECIO_CREDITO * n * 100) / 100;
+    const precioUnitario = n > 0 ? Math.round((monto / n) * 100) / 100 : PRECIO_CREDITO;
 
     const conn = await pool().getConnection();
     try {
@@ -283,7 +323,7 @@ export const planRepo = {
       }
 
       await conn.commit();
-      return { agregados: n, precio_unitario: PRECIO_CREDITO, monto };
+      return { agregados: n, precio_unitario: precioUnitario, monto };
     } catch (e) {
       await conn.rollback();
       throw e;
@@ -298,6 +338,8 @@ export const planRepo = {
    * DEBE correr dentro de una transacción.
    */
   async devolverCupo(conn: PoolConnection, empresaId: number): Promise<void> {
+    // Aplica también a planes ilimitados: como el consumo SÍ se registró, al
+    // eliminar el certificado se revierte el movimiento (ajusta el conteo).
     // Modelo de CRÉDITOS: al eliminar un certificado se devuelve 1 crédito.
     const [rows] = await conn.query<any[]>(
       'SELECT creditos_disponibles FROM empresas WHERE id = ? FOR UPDATE',
@@ -362,7 +404,7 @@ export const planRepo = {
    */
   async marcarPagado(
     empresaId: number,
-    opts: { monto?: number; fecha_pago?: string; comprobante_tipo_id?: number; comprobante_numero?: string; emitir_comprobante?: boolean; renovar?: boolean } = {},
+    opts: { monto?: number; fecha_pago?: string; comprobante_tipo_id?: number; comprobante_numero?: string; emitir_comprobante?: boolean; renovar?: boolean; registrar_pago?: boolean } = {},
   ): Promise<EstadoPlan> {
     let pagoId = 0;
     let montoPagado = 0;
@@ -393,19 +435,23 @@ export const planRepo = {
       montoPagado = monto;
       planNombre = s.plan_nombre ?? 'plan';
 
-      // Registrar el pago de la suscripción (pagado).
-      const [insPago] = await conn.query<any>(
-        `INSERT INTO pagos
-           (empresa_id, suscripcion_id, concepto_id, monto, estado_id, fecha_pago, comprobante_tipo_id, comprobante_numero)
-         VALUES (?, ?, 1, ?, 2, ?, ?, ?)`,
-        [
-          empresaId, s.id, monto,
-          opts.fecha_pago ? `${opts.fecha_pago.slice(0, 10)} 00:00:00` : new Date(),
-          opts.comprobante_tipo_id ?? 1,
-          opts.comprobante_numero?.trim() || null,
-        ],
-      );
-      pagoId = insPago.insertId;
+      // Registrar el pago de la suscripción (pagado). Se OMITE cuando
+      // registrar_pago=false (ej. "Confirmar pago del mantenimiento": el pago ya
+      // se registró con "Nueva venta"; este botón SOLO renueva el mes).
+      if (opts.registrar_pago !== false) {
+        const [insPago] = await conn.query<any>(
+          `INSERT INTO pagos
+             (empresa_id, suscripcion_id, concepto_id, monto, estado_id, fecha_pago, comprobante_tipo_id, comprobante_numero)
+           VALUES (?, ?, 1, ?, 2, ?, ?, ?)`,
+          [
+            empresaId, s.id, monto,
+            opts.fecha_pago ? `${opts.fecha_pago.slice(0, 10)} 00:00:00` : new Date(),
+            opts.comprobante_tipo_id ?? 1,
+            opts.comprobante_numero?.trim() || null,
+          ],
+        );
+        pagoId = insPago.insertId;
+      }
 
       // Renovar: encadena desde fecha_fin si sigue vigente, o desde hoy si ya venció.
       // Se omite en la PRIMERA venta (renovar=false): el período inicial ya se
@@ -454,7 +500,9 @@ export const planRepo = {
       `SELECT pg.id, pg.monto, pg.moneda, pg.metodo, pg.referencia_niubiz,
               pg.comprobante_numero, pg.created_at, pg.fecha_pago, pg.comprobante_id,
               cp.nombre AS concepto, ep.nombre AS estado, tc.nombre AS comprobante_tipo,
-              c.serie AS cpe_serie, c.correlativo AS cpe_correlativo, ecc.codigo AS cpe_estado
+              c.serie AS cpe_serie, c.correlativo AS cpe_correlativo, ecc.codigo AS cpe_estado,
+              (SELECT GROUP_CONCAT(cd.descripcion ORDER BY cd.orden SEPARATOR ' · ')
+                 FROM comprobante_detalle cd WHERE cd.comprobante_id = c.id) AS detalle
          FROM pagos pg
          JOIN concepto_pago    cp ON cp.id = pg.concepto_id
          JOIN estado_pago      ep ON ep.id = pg.estado_id
@@ -479,6 +527,7 @@ export const planRepo = {
       cpe_id:            r.comprobante_id ?? null,
       cpe_numero:        r.cpe_serie ? `${r.cpe_serie}-${r.cpe_correlativo}` : null,
       cpe_estado:        r.cpe_estado ?? null,
+      detalle:           r.detalle ?? null,
     }));
   },
 };
@@ -498,6 +547,8 @@ export interface PagoHist {
   cpe_id: number | null;
   cpe_numero: string | null;       // F001-3
   cpe_estado: string | null;       // ACEPTADO / RECHAZADO...
+  /** Líneas facturadas (lo que se envió en el comprobante: "Implementación · Mantenimiento…"). */
+  detalle: string | null;
 }
 
 /** Fila del control de cobranza de Vaxa (una por empresa). */

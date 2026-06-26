@@ -938,11 +938,54 @@ export const inscripcionesRepo = {
 // ============================================================
 // LOGOS
 // ============================================================
+/** Planes cuyo logo de empresa (logo_url) es OBLIGATORIO en los certificados. */
+export const PLANES_LOGO_DEFAULT = ['basico', 'profesional'];
+
+/**
+ * Garantiza que exista (y esté sincronizado) el logo default de la empresa cuando
+ * su plan lo exige (Básico/Profesional). Materializa empresas.logo_url como una
+ * fila en `logos` con es_default=1. Si el plan NO lo exige, no hace nada.
+ */
+async function ensureLogoDefault(empresaId: number): Promise<void> {
+  const [emp] = await pool().query<any[]>(
+    `SELECT e.logo_url, pl.slug AS plan_slug
+       FROM empresas e LEFT JOIN planes pl ON pl.id = e.plan_actual_id
+      WHERE e.id = ? LIMIT 1`,
+    [empresaId],
+  );
+  const row = (emp as any[])[0];
+  const aplica = !!row?.logo_url && PLANES_LOGO_DEFAULT.includes(row.plan_slug);
+  if (!aplica) {
+    // El plan ya no exige logo obligatorio (ej. subió a Empresarial/Corporativo):
+    // desbloquear el default que hubiera para que sea un logo normal (eliminable).
+    await pool().query('UPDATE logos SET es_default = 0 WHERE empresa_id = ? AND es_default = 1', [empresaId]);
+    return;
+  }
+
+  const [exist] = await pool().query<any[]>(
+    'SELECT id, imagen_logo FROM logos WHERE empresa_id = ? AND es_default = 1 AND activo = 1 LIMIT 1',
+    [empresaId],
+  );
+  if ((exist as any[]).length) {
+    // Mantenerlo sincronizado si Vaxa cambió el logo de la empresa.
+    if (exist[0].imagen_logo !== row.logo_url) {
+      await pool().query('UPDATE logos SET imagen_logo = ? WHERE id = ?', [row.logo_url, exist[0].id]);
+    }
+    return;
+  }
+  await pool().query(
+    `INSERT INTO logos (empresa_id, nombre, imagen_logo, es_default) VALUES (?, 'Logo de la empresa', ?, 1)`,
+    [empresaId, row.logo_url],
+  );
+}
+
 export const logosRepo = {
+  ensureLogoDefault,
   async findAll(tenantSlug: string): Promise<LogoEntity[]> {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureLogoDefault(empresaId);  // crea/sincroniza el logo obligatorio si aplica
     const [rows] = await pool().query<any[]>(
-      'SELECT * FROM logos WHERE empresa_id = ? AND activo = 1 ORDER BY created_at DESC',
+      'SELECT * FROM logos WHERE empresa_id = ? AND activo = 1 ORDER BY es_default DESC, created_at DESC',
       [empresaId],
     );
     return (rows as any[]).map(LogoEntity.fromRow);
@@ -960,6 +1003,13 @@ export const logosRepo = {
 
   async remove(tenantSlug: string, id: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    // El logo default es obligatorio: no se puede eliminar.
+    const [chk] = await pool().query<any[]>(
+      'SELECT es_default FROM logos WHERE id = ? AND empresa_id = ?', [id, empresaId],
+    );
+    if ((chk as any[])[0]?.es_default) {
+      throw new Error('LOGO_DEFAULT: El logo de la empresa es obligatorio en tu plan y no se puede eliminar.');
+    }
     const [r] = await pool().query<any>('UPDATE logos SET activo = 0 WHERE id = ? AND empresa_id = ?', [id, empresaId]);
     return r.affectedRows > 0;
   },
@@ -1547,6 +1597,24 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       }
     }
 
+    // Logos del cert. Logo DEFAULT obligatorio (planes Básico/Profesional): el
+    // logo de la empresa (logo_url) SIEMPRE aparece, aunque la config no lo tenga
+    // seleccionado — red de seguridad. Va primero (orden -1).
+    let logosDatos = (config?.logos ?? []).map((l: any) => ({
+      imagen: l.imagen_logo, nombre: l.nombre, orden: l.orden,
+    }));
+    const [empLogoRows] = await pool().query<any[]>(
+      `SELECT e.logo_url, pl.slug AS plan_slug
+         FROM empresas e LEFT JOIN planes pl ON pl.id = e.plan_actual_id
+        WHERE e.tenant_slug = ? LIMIT 1`,
+      [tenantSlug],
+    );
+    const empLogo = (empLogoRows as any[])[0];
+    if (empLogo?.logo_url && PLANES_LOGO_DEFAULT.includes(empLogo.plan_slug)
+        && !logosDatos.some((l: any) => l.imagen === empLogo.logo_url)) {
+      logosDatos = [{ imagen: empLogo.logo_url, nombre: 'Logo de la empresa', orden: -1 }, ...logosDatos];
+    }
+
     return {
       participante_nombre:  cert.participante_nombre,
       programa_nombre:      cert.programa_nombre,
@@ -1560,9 +1628,7 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       empresa_nombre:       cert.tenant_slug ?? tenantSlug,
       texto_personalizado:  (config as any)?.texto_personalizado ?? null,
       plantilla_url:        config?.plantilla_url ?? null,
-      logos: (config?.logos ?? []).map((l: any) => ({
-        imagen: l.imagen_logo, nombre: l.nombre, orden: l.orden,
-      })),
+      logos: logosDatos,
       firmas: (config?.firmas ?? []).map((f: any) => ({
         nombre_autoridad: f.nombre_autoridad, cargo: f.cargo,
         imagen: f.imagen_firma, orden: f.orden,

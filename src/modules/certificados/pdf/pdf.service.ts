@@ -309,7 +309,8 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
           });
 
         // ── FIRMAS ───────────────────────────────────────────
-        const firmasOrdenadas = [...datos.firmas].sort((a, b) => a.orden - b.orden);
+        // Máximo 3 firmas en el certificado (igual que los logos).
+        const firmasOrdenadas = [...datos.firmas].sort((a, b) => a.orden - b.orden).slice(0, 3);
         if (firmasOrdenadas.length > 0) {
           const SIG_W     = 150;
           const SIG_IMG_H = 40;

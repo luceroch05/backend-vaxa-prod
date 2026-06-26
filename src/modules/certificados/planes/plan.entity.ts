@@ -74,8 +74,10 @@ export interface Cobranza {
 /** Saldo de créditos de la empresa (modelo créditos + mantenimiento). */
 export interface CreditosSaldo {
   disponibles: number;   // saldo actual para emitir
-  asignados: number;     // total histórico asignado
+  asignados: number;     // total histórico asignado (plan + recargas)
   consumidos: number;    // asignados - disponibles
+  recargados: number;    // total comprado aparte (movimientos tipo 'recarga'); el resto vino del plan
+  ilimitado: boolean;    // plan con creditos_incluidos = 0 (ej. Corporativo): emite sin tope
 }
 
 export interface EstadoPlan {

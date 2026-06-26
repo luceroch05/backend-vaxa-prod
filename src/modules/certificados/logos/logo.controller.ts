@@ -13,7 +13,13 @@ export async function createLogo(req: Request, res: Response): Promise<void> {
 }
 
 export async function deleteLogo(req: Request, res: Response): Promise<void> {
-  const ok = await logoService.remove(tid(req), Number(req.params.id));
-  if (!ok) { res.status(404).json({ error: 'Logo no encontrado' }); return; }
-  res.status(204).send();
+  try {
+    const ok = await logoService.remove(tid(req), Number(req.params.id));
+    if (!ok) { res.status(404).json({ error: 'Logo no encontrado' }); return; }
+    res.status(204).send();
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (msg.startsWith('LOGO_DEFAULT')) { res.status(409).json({ error: msg, code: 'LOGO_DEFAULT' }); return; }
+    throw e;
+  }
 }

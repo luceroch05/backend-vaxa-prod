@@ -86,12 +86,15 @@ export const creditosRepo = {
   /** [Admin Vaxa] Todas las empresas con su saldo y consumo. */
   async listEmpresas() {
     const [rows] = await pool().query<any[]>(
-      `SELECT id, razon_social, tenant_slug,
-              creditos_disponibles, creditos_asignados_total,
-              (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
-       FROM empresas WHERE activo = 1 ORDER BY razon_social`,
+      `SELECT e.id, e.razon_social, e.tenant_slug,
+              e.creditos_disponibles, e.creditos_asignados_total,
+              (e.creditos_asignados_total - e.creditos_disponibles) AS creditos_consumidos,
+              (p.id IS NOT NULL AND p.creditos_incluidos = 0) AS ilimitado
+       FROM empresas e
+       LEFT JOIN planes p ON p.id = e.plan_actual_id
+       WHERE e.activo = 1 ORDER BY e.razon_social`,
     );
-    return rows;
+    return (rows as any[]).map(r => ({ ...r, ilimitado: !!r.ilimitado }));
   },
 
   /**
