@@ -14,5 +14,5 @@ export const inscripcionService = {
     emitir: boolean,
     uid?: number,
   ) => inscripcionesRepo.importarMasivo(tenantSlug, grupoId, filas, emitir, uid),
-  remove:        (tenantSlug: string, id: number)                                    => inscripcionesRepo.remove(tenantSlug, id),
+  remove:        (tenantSlug: string, id: number, uid?: number)                      => inscripcionesRepo.remove(tenantSlug, id, uid),
 };

@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { participanteService } from './participante.service';
-import { tid } from '../shared/router.helper';
+import { tid, uid } from '../shared/router.helper';
 import { DatosAsociadosError } from '../shared/certificados.repository';
 
 export async function listParticipantes(req: Request, res: Response): Promise<void> {
@@ -10,7 +10,7 @@ export async function listParticipantes(req: Request, res: Response): Promise<vo
 
 /** Edita los datos de un estudiante. */
 export async function actualizarParticipante(req: Request, res: Response): Promise<void> {
-  const p = await participanteService.update(tid(req), Number(req.params.id), req.body ?? {});
+  const p = await participanteService.update(tid(req), Number(req.params.id), req.body ?? {}, uid(req));
   if (!p) { res.status(404).json({ error: 'Estudiante no encontrado' }); return; }
   res.json(p);
 }
@@ -18,7 +18,7 @@ export async function actualizarParticipante(req: Request, res: Response): Promi
 /** BORRA un estudiante y sus inscripciones (con protección de certificados). */
 export async function eliminarParticipante(req: Request, res: Response): Promise<void> {
   try {
-    const ok = await participanteService.remove(tid(req), Number(req.params.id));
+    const ok = await participanteService.remove(tid(req), Number(req.params.id), uid(req));
     if (!ok) { res.status(404).json({ error: 'Estudiante no encontrado' }); return; }
     res.status(204).send();
   } catch (e) {
@@ -30,7 +30,7 @@ export async function eliminarParticipante(req: Request, res: Response): Promise
 /** Archiva (desactiva) o reactiva un estudiante. Body: { activo: boolean }. */
 export async function setActivoParticipante(req: Request, res: Response): Promise<void> {
   const activo = req.body?.activo !== false;
-  const p = await participanteService.setActivo(tid(req), Number(req.params.id), activo);
+  const p = await participanteService.setActivo(tid(req), Number(req.params.id), activo, uid(req));
   if (!p) { res.status(404).json({ error: 'Participante no encontrado' }); return; }
   res.json(p);
 }
@@ -57,6 +57,6 @@ export async function createParticipante(req: Request, res: Response): Promise<v
     res.status(400).json({ error: 'tipo_documento_id, numero_documento, nombres y apellidos son requeridos' }); return;
   }
   res.status(201).json(
-    await participanteService.create(tid(req), { tipo_documento_id, numero_documento, nombres, apellidos, email, telefono }),
+    await participanteService.create(tid(req), { tipo_documento_id, numero_documento, nombres, apellidos, email, telefono }, uid(req)),
   );
 }

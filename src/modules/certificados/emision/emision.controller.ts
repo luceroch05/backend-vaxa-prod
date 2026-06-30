@@ -22,6 +22,21 @@ export async function generarCertificado(req: Request, res: Response): Promise<v
   }
 }
 
+/** Emisión EN LOTE: emite varias inscripciones y registra UN solo movimiento de crédito. */
+export async function generarLote(req: Request, res: Response): Promise<void> {
+  const ids: number[] = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
+  if (ids.length === 0) { res.status(400).json({ error: 'ids (lista no vacía) es requerido' }); return; }
+  try {
+    res.json(await emisionService.generarLote(tid(req), ids, uid(req)));
+  } catch (e) {
+    if (e instanceof SinCreditosError) {
+      res.status(409).json({ error: e.message, code: 'SIN_CREDITOS' });
+      return;
+    }
+    throw e;
+  }
+}
+
 export async function validarPublico(req: Request, res: Response): Promise<void> {
   const tenantSlug = req.params.tenantSlug;
   if (!tenantSlug) { res.status(400).json({ error: 'Empresa requerida' }); return; }

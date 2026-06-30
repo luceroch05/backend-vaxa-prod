@@ -1,7 +1,9 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import type { PoolConnection } from 'mysql2/promise';
 import { pool, getEmpresaId } from './db.helper';
 import { planRepo } from '../planes/plan.repository';
+import { auditoriaRepo, describirCambios } from '../auditoria/auditoria.repository';
 import { aTituloNombre } from '../../../shared/text';
 import { pdfService, type PdfDatos } from '../pdf/pdf.service';
 
@@ -115,7 +117,12 @@ export const programasRepo = {
       'UPDATE programas SET activo = ?, user_actua_id = ? WHERE id = ? AND empresa_id = ?',
       [activo ? 1 : 0, userId ?? null, id, empresaId],
     );
-    return programasRepo.findById(tenantSlug, id);
+    const prog = await programasRepo.findById(tenantSlug, id);
+    if (prog) auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'programa', entidadId: id, entidadNombre: prog.nombre,
+      descripcion: `${activo ? 'Reactivó' : 'Archivó'} el programa "${prog.nombre}"`,
+    });
+    return prog;
   },
 
   async create(tenantSlug: string, dto: CreateProgramaDto, userId?: number): Promise<ProgramaEntity> {
@@ -126,11 +133,17 @@ export const programasRepo = {
       [empresaId, dto.tipo_programa_id, dto.nombre, dto.descripcion ?? null, dto.horas_academicas,
        dto.unidad_label || 'Unidad', dto.nota_minima ?? 11, userId ?? null],
     );
-    return (await programasRepo.findById(tenantSlug, result.insertId))!;
+    const prog = (await programasRepo.findById(tenantSlug, result.insertId))!;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'crear', entidad: 'programa', entidadId: prog.id, entidadNombre: prog.nombre,
+      descripcion: `Creó el programa "${prog.nombre}"`,
+    });
+    return prog;
   },
 
   async update(tenantSlug: string, id: number, dto: UpdateProgramaDto, userId?: number): Promise<ProgramaEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const antes = await programasRepo.findById(tenantSlug, id);
     const fields: string[] = [];
     const values: any[]    = [];
     if (dto.nombre           !== undefined) { fields.push('nombre = ?');           values.push(dto.nombre); }
@@ -143,15 +156,31 @@ export const programasRepo = {
       fields.push('user_actua_id = ?'); values.push(userId ?? null, id, empresaId);
       await pool().query(`UPDATE programas SET ${fields.join(', ')} WHERE id = ? AND empresa_id = ?`, values);
     }
-    return programasRepo.findById(tenantSlug, id);
+    const despues = await programasRepo.findById(tenantSlug, id);
+    if (antes && despues) {
+      const { texto, detalle } = describirCambios(antes, despues, [
+        { key: 'nombre', label: 'nombre' },
+        { key: 'descripcion', label: 'descripción' },
+        { key: 'horas_academicas', label: 'horas' },
+        { key: 'tipo_programa_id', label: 'tipo' },
+        { key: 'unidad_label', label: 'rótulo de unidad' },
+        { key: 'nota_minima', label: 'nota mínima' },
+      ]);
+      if (texto) auditoriaRepo.registrar({
+        empresaId, usuarioId: userId, accion: 'editar', entidad: 'programa', entidadId: id, entidadNombre: despues.nombre,
+        descripcion: `Editó el programa "${despues.nombre}": ${texto}`, detalle,
+      });
+    }
+    return despues;
   },
 
   /**
    * BORRA un programa por completo (aulas, inscripciones, notas, unidades y diseño).
    * Protección: si hay certificados emitidos bajo el programa, NO borra y avisa.
    */
-  async remove(tenantSlug: string, id: number): Promise<boolean> {
+  async remove(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const nombrePrev = (await programasRepo.findById(tenantSlug, id))?.nombre ?? null;
     const conn = await pool().getConnection();
     try {
       await conn.beginTransaction();
@@ -186,6 +215,10 @@ export const programasRepo = {
 
       await conn.commit();
       borrarPdfs(urlsCert);
+      if (r.affectedRows > 0) auditoriaRepo.registrar({
+        empresaId, usuarioId: userId, accion: 'eliminar', entidad: 'programa', entidadId: id, entidadNombre: nombrePrev,
+        descripcion: `Eliminó el programa "${nombrePrev ?? id}" (con sus aulas, inscripciones y diseño)`,
+      });
       return r.affectedRows > 0;
     } catch (e) {
       await conn.rollback();
@@ -216,11 +249,20 @@ export const unidadesRepo = {
       [empresaId, dto.programa_id, dto.nombre, dto.orden ?? 1, userId ?? null],
     );
     const [rows] = await pool().query<any[]>(`SELECT * FROM unidades WHERE id = ?`, [result.insertId]);
-    return UnidadEntity.fromRow(rows[0]);
+    const unidad = UnidadEntity.fromRow(rows[0]);
+    const [pn] = await pool().query<any[]>('SELECT nombre FROM programas WHERE id = ? AND empresa_id = ?', [dto.programa_id, empresaId]);
+    const programa = (pn as any[])[0]?.nombre ?? null;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'crear', entidad: 'unidad', entidadId: unidad.id, entidadNombre: unidad.nombre,
+      descripcion: `Agregó la unidad "${unidad.nombre}"${programa ? ` al programa "${programa}"` : ''}`,
+    });
+    return unidad;
   },
 
   async update(tenantSlug: string, id: number, dto: UpdateUnidadDto, userId?: number): Promise<UnidadEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const [prevRows] = await pool().query<any[]>(`SELECT * FROM unidades WHERE id = ? AND empresa_id = ?`, [id, empresaId]);
+    const antes = prevRows[0] ? UnidadEntity.fromRow(prevRows[0]) : null;
     const fields: string[] = [];
     const values: any[]    = [];
     if (dto.nombre !== undefined) { fields.push('nombre = ?'); values.push(dto.nombre); }
@@ -230,13 +272,40 @@ export const unidadesRepo = {
       await pool().query(`UPDATE unidades SET ${fields.join(', ')} WHERE id = ? AND empresa_id = ?`, values);
     }
     const [rows] = await pool().query<any[]>(`SELECT * FROM unidades WHERE id = ? AND empresa_id = ?`, [id, empresaId]);
-    return rows[0] ? UnidadEntity.fromRow(rows[0]) : null;
+    const despues = rows[0] ? UnidadEntity.fromRow(rows[0]) : null;
+    if (antes && despues) {
+      const { texto, detalle } = describirCambios(antes, despues, [
+        { key: 'nombre', label: 'nombre' },
+        { key: 'orden', label: 'orden' },
+      ]);
+      if (texto) {
+        const [pn] = await pool().query<any[]>('SELECT nombre FROM programas WHERE id = ? AND empresa_id = ?', [despues.programa_id, empresaId]);
+        const programa = (pn as any[])[0]?.nombre ?? null;
+        auditoriaRepo.registrar({
+          empresaId, usuarioId: userId, accion: 'editar', entidad: 'unidad', entidadId: id, entidadNombre: despues.nombre,
+          descripcion: `Editó la unidad "${despues.nombre}"${programa ? ` del programa "${programa}"` : ''}: ${texto}`, detalle,
+        });
+      }
+    }
+    return despues;
   },
 
-  async remove(tenantSlug: string, id: number): Promise<boolean> {
+  async remove(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const [prevRows] = await pool().query<any[]>(
+      `SELECT u.nombre, p.nombre AS programa
+         FROM unidades u LEFT JOIN programas p ON p.id = u.programa_id
+        WHERE u.id = ? AND u.empresa_id = ?`,
+      [id, empresaId],
+    );
+    const nombrePrev = (prevRows as any[])[0]?.nombre ?? null;
+    const programa = (prevRows as any[])[0]?.programa ?? null;
     // El borrado de unidad arrastra sus notas (ON DELETE CASCADE).
     const [r] = await pool().query<any>(`DELETE FROM unidades WHERE id = ? AND empresa_id = ?`, [id, empresaId]);
+    if (r.affectedRows > 0) auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'eliminar', entidad: 'unidad', entidadId: id, entidadNombre: nombrePrev,
+      descripcion: `Eliminó la unidad "${nombrePrev ?? id}"${programa ? ` del programa "${programa}"` : ''}`,
+    });
     return r.affectedRows > 0;
   },
 };
@@ -386,6 +455,27 @@ export const notasRepo = {
        WHERE i.id = ? AND i.empresa_id = ?`,
       [inscripcionId, empresaId],
     );
+
+    const [meta] = await pool().query<any[]>(
+      `SELECT CONCAT(p.nombres,' ',p.apellidos) AS alumno, p.numero_documento AS doc,
+              prog.nombre AS programa, g.nombre_grupo AS aula
+         FROM inscripciones i
+         JOIN participantes p    ON p.id = i.participante_id
+         JOIN grupos_programas g ON g.id = i.grupo_id
+         JOIN programas prog     ON prog.id = g.programa_id
+        WHERE i.id = ? AND i.empresa_id = ?`,
+      [inscripcionId, empresaId],
+    );
+    const m = (meta as any[])[0] ?? {};
+    const alumno = m.alumno ?? null;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'nota', entidadId: inscripcionId, entidadNombre: alumno,
+      descripcion: `Registró/actualizó ${notas.length} nota(s) de ${alumno ?? 'un alumno'}${m.doc ? ` (${m.doc})` : ''}`
+        + `${m.programa ? ` en el programa "${m.programa}"` : ''}${m.aula ? ` · aula "${m.aula}"` : ''}`
+        + `${row[0]?.estado_nombre ? ` · resultado: ${row[0].estado_nombre}` : ''}`,
+      detalle: { notas: notas.length, estado: row[0]?.estado_nombre ?? null, programa: m.programa ?? null, aula: m.aula ?? null },
+    });
+
     return row[0] ?? null;
   },
 
@@ -450,18 +540,24 @@ export const gruposRepo = {
   },
 
   /** Activa/desactiva un aula (soft-delete). */
-  async setActivo(tenantSlug: string, id: number, activo: boolean): Promise<GrupoEntity | null> {
+  async setActivo(tenantSlug: string, id: number, activo: boolean, userId?: number): Promise<GrupoEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
     await pool().query(
       'UPDATE grupos_programas SET activo = ? WHERE id = ? AND empresa_id = ?',
       [activo ? 1 : 0, id, empresaId],
     );
-    return gruposRepo.findById(tenantSlug, id);
+    const grupo = await gruposRepo.findById(tenantSlug, id);
+    if (grupo) auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'aula', entidadId: id, entidadNombre: grupo.nombre_grupo,
+      descripcion: `${activo ? 'Reactivó' : 'Archivó'} el aula "${grupo.nombre_grupo}" (${grupo.programa_nombre})`,
+    });
+    return grupo;
   },
 
   /** BORRA un aula, sus inscripciones/notas y certificados (devuelve cupo + borra PDFs). */
-  async remove(tenantSlug: string, id: number): Promise<boolean> {
+  async remove(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const grupoPrev = await gruposRepo.findById(tenantSlug, id);
     const conn = await pool().getConnection();
     try {
       await conn.beginTransaction();
@@ -489,6 +585,11 @@ export const gruposRepo = {
 
       await conn.commit();
       borrarPdfs(urlsCert);
+      if (r.affectedRows > 0) auditoriaRepo.registrar({
+        empresaId, usuarioId: userId, accion: 'eliminar', entidad: 'aula', entidadId: id,
+        entidadNombre: grupoPrev?.nombre_grupo ?? null,
+        descripcion: `Eliminó el aula "${grupoPrev?.nombre_grupo ?? id}"${grupoPrev?.programa_nombre ? ` (${grupoPrev.programa_nombre})` : ''} con sus inscripciones`,
+      });
       return r.affectedRows > 0;
     } catch (e) {
       await conn.rollback();
@@ -520,7 +621,12 @@ export const gruposRepo = {
        dto.dias_semana ?? null, dto.hora_inicio ?? null, dto.hora_fin ?? null,
        dto.modalidad_id, userId ?? null],
     );
-    return (await gruposRepo.findById(tenantSlug, result.insertId))!;
+    const grupo = (await gruposRepo.findById(tenantSlug, result.insertId))!;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'crear', entidad: 'aula', entidadId: grupo.id, entidadNombre: grupo.nombre_grupo,
+      descripcion: `Creó el aula "${grupo.nombre_grupo}" en el programa "${grupo.programa_nombre}"`,
+    });
+    return grupo;
   },
 };
 
@@ -542,18 +648,25 @@ export const participantesRepo = {
   },
 
   /** Activa/desactiva un estudiante (soft-delete). */
-  async setActivo(tenantSlug: string, id: number, activo: boolean): Promise<ParticipanteEntity | null> {
+  async setActivo(tenantSlug: string, id: number, activo: boolean, userId?: number): Promise<ParticipanteEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
     await pool().query(
       'UPDATE participantes SET activo = ? WHERE id = ? AND empresa_id = ?',
       [activo ? 1 : 0, id, empresaId],
     );
-    return participantesRepo.findById(tenantSlug, id);
+    const p = await participantesRepo.findById(tenantSlug, id);
+    if (p) auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'participante', entidadId: id,
+      entidadNombre: `${p.nombres} ${p.apellidos}`,
+      descripcion: `${activo ? 'Reactivó' : 'Archivó'} al estudiante ${p.nombres} ${p.apellidos} (${p.numero_documento})`,
+    });
+    return p;
   },
 
   /** BORRA un estudiante, sus inscripciones/notas y sus certificados (devuelve cupo + borra PDFs). */
-  async remove(tenantSlug: string, id: number): Promise<boolean> {
+  async remove(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const prev = await participantesRepo.findById(tenantSlug, id);
     const conn = await pool().getConnection();
     try {
       await conn.beginTransaction();
@@ -571,6 +684,11 @@ export const participantesRepo = {
 
       await conn.commit();
       borrarPdfs(urls);
+      if (r.affectedRows > 0) auditoriaRepo.registrar({
+        empresaId, usuarioId: userId, accion: 'eliminar', entidad: 'participante', entidadId: id,
+        entidadNombre: prev ? `${prev.nombres} ${prev.apellidos}` : null,
+        descripcion: `Eliminó al estudiante ${prev ? `${prev.nombres} ${prev.apellidos} (${prev.numero_documento})` : id} con sus inscripciones`,
+      });
       return r.affectedRows > 0;
     } catch (e) {
       await conn.rollback();
@@ -615,12 +733,19 @@ export const participantesRepo = {
        aTituloNombre(dto.nombres), aTituloNombre(dto.apellidos),
        dto.email ?? null, dto.telefono ?? null, userId ?? null],
     );
-    return (await participantesRepo.findById(tenantSlug, result.insertId))!;
+    const p = (await participantesRepo.findById(tenantSlug, result.insertId))!;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'crear', entidad: 'participante', entidadId: p.id,
+      entidadNombre: `${p.nombres} ${p.apellidos}`,
+      descripcion: `Registró al estudiante ${p.nombres} ${p.apellidos} (${p.numero_documento})`,
+    });
+    return p;
   },
 
   /** Edita los datos de un estudiante. Solo actualiza los campos enviados. */
-  async update(tenantSlug: string, id: number, dto: Partial<CreateParticipanteDto>): Promise<ParticipanteEntity | null> {
+  async update(tenantSlug: string, id: number, dto: Partial<CreateParticipanteDto>, userId?: number): Promise<ParticipanteEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const antes = await participantesRepo.findById(tenantSlug, id);
     const fields: string[] = [];
     const values: any[]    = [];
     if (dto.tipo_documento_id !== undefined) { fields.push('tipo_documento_id = ?'); values.push(dto.tipo_documento_id); }
@@ -633,7 +758,22 @@ export const participantesRepo = {
       values.push(id, empresaId);
       await pool().query(`UPDATE participantes SET ${fields.join(', ')} WHERE id = ? AND empresa_id = ?`, values);
     }
-    return participantesRepo.findById(tenantSlug, id);
+    const despues = await participantesRepo.findById(tenantSlug, id);
+    if (antes && despues) {
+      const { texto, detalle } = describirCambios(antes, despues, [
+        { key: 'numero_documento', label: 'documento' },
+        { key: 'nombres', label: 'nombres' },
+        { key: 'apellidos', label: 'apellidos' },
+        { key: 'email', label: 'email' },
+        { key: 'telefono', label: 'teléfono' },
+      ]);
+      if (texto) auditoriaRepo.registrar({
+        empresaId, usuarioId: userId, accion: 'editar', entidad: 'participante', entidadId: id,
+        entidadNombre: `${despues.nombres} ${despues.apellidos}`,
+        descripcion: `Editó al estudiante ${despues.nombres} ${despues.apellidos}: ${texto}`, detalle,
+      });
+    }
+    return despues;
   },
 };
 
@@ -700,6 +840,7 @@ export const inscripcionesRepo = {
    * si no, crea el participante. Valida que no esté ya inscrito en el programa.
    */
   async inscribir(tenantSlug: string, dto: InscribirDto, userId?: number) {
+    const empresaId = await getEmpresaId(tenantSlug);
     let participante = await participantesRepo.findByDocumento(tenantSlug, dto.numero_documento, dto.tipo_documento_id);
     if (!participante) {
       participante = await participantesRepo.create(tenantSlug, {
@@ -717,6 +858,21 @@ export const inscripcionesRepo = {
       grupo_id:          dto.grupo_id,
       fecha_inscripcion: dto.fecha_inscripcion ?? new Date().toISOString().split('T')[0],
     }, userId);
+
+    const [gr] = await pool().query<any[]>(
+      `SELECT g.nombre_grupo AS aula, prog.nombre AS programa
+         FROM grupos_programas g JOIN programas prog ON prog.id = g.programa_id
+        WHERE g.id = ? AND g.empresa_id = ?`,
+      [dto.grupo_id, empresaId],
+    );
+    const aula = (gr as any[])[0]?.aula ?? null;
+    const programa = (gr as any[])[0]?.programa ?? null;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'crear', entidad: 'inscripcion', entidadId: inscripcion.id,
+      entidadNombre: `${participante.nombres} ${participante.apellidos}`,
+      descripcion: `Inscribió a ${participante.nombres} ${participante.apellidos} (${participante.numero_documento})`
+        + `${programa ? ` en el programa "${programa}"` : ''}${aula ? ` · aula "${aula}"` : ''}`,
+    });
     return { participante, inscripcion };
   },
 
@@ -811,7 +967,7 @@ export const inscripcionesRepo = {
             'UPDATE inscripciones SET estado_id = 3, user_actua_id = ? WHERE id = ? AND empresa_id = ?',
             [userId ?? null, inscripcionId, empresaId],
           );
-          await emisionRepo.generar(tenantSlug, inscripcionId, userId);
+          await emisionRepo.generar(tenantSlug, inscripcionId, userId, { auditar: false });
           resultados.push({ ...base, estado: 'emitido' });
         } catch (eEmit) {
           if (!yaInscrito) {
@@ -826,17 +982,26 @@ export const inscripcionesRepo = {
     }
 
     const cuenta = (k: Estado) => resultados.filter(r => r.estado === k).length;
-    return {
-      resumen: {
-        total:        filas.length,
-        inscritos:    cuenta('inscrito'),
-        ya_inscritos: cuenta('ya_inscrito'),
-        emitidos:     cuenta('emitido'),
-        ya_emitidos:  cuenta('ya_emitido'),
-        errores:      cuenta('error'),
-      },
-      resultados,
+    const resumen = {
+      total:        filas.length,
+      inscritos:    cuenta('inscrito'),
+      ya_inscritos: cuenta('ya_inscrito'),
+      emitidos:     cuenta('emitido'),
+      ya_emitidos:  cuenta('ya_emitido'),
+      errores:      cuenta('error'),
     };
+
+    const [gn] = await pool().query<any[]>('SELECT nombre_grupo FROM grupos_programas WHERE id = ?', [grupoId]);
+    const aula = (gn as any[])[0]?.nombre_grupo ?? null;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'importar', entidad: 'inscripcion', entidadId: grupoId, entidadNombre: aula,
+      descripcion: `Importó ${resumen.inscritos} estudiante(s) por Excel al aula "${aula ?? grupoId}"`
+        + (emitir ? ` y emitió ${resumen.emitidos} certificado(s)` : '')
+        + (resumen.errores ? ` · ${resumen.errores} con error` : ''),
+      detalle: resumen,
+    });
+
+    return { resumen, resultados };
   },
 
   async cambiarEstado(tenantSlug: string, id: number, estadoId: number, userId?: number): Promise<InscripcionEntity | null> {
@@ -865,15 +1030,22 @@ export const inscripcionesRepo = {
     if (!upd.affectedRows) return null;
     const [rows] = await pool().query<any[]>(
       `SELECT i.*, CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
-              p.numero_documento, g.nombre_grupo, ei.nombre AS estado_nombre
+              p.numero_documento, g.nombre_grupo, prog.nombre AS programa_nombre, ei.nombre AS estado_nombre
        FROM inscripciones i
        JOIN participantes p       ON p.id  = i.participante_id
        JOIN grupos_programas g    ON g.id  = i.grupo_id
+       JOIN programas prog        ON prog.id = g.programa_id
        JOIN estado_inscripcion ei ON ei.id = i.estado_id
        WHERE i.id = ?`,
       [id],
     );
-    return rows[0] ? InscripcionEntity.fromRow(rows[0]) : null;
+    const r = rows[0];
+    if (r) auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'inscripcion', entidadId: id,
+      entidadNombre: r.participante_nombre,
+      descripcion: `Cambió el estado de ${r.participante_nombre}${r.numero_documento ? ` (${r.numero_documento})` : ''} a "${r.estado_nombre}" en el programa "${r.programa_nombre}" · aula "${r.nombre_grupo}"`,
+    });
+    return r ? InscripcionEntity.fromRow(r) : null;
   },
 
   /**
@@ -908,13 +1080,41 @@ export const inscripcionesRepo = {
        WHERE id IN (${placeholders}) AND empresa_id = ?`,
       [estadoId, userId ?? null, ...idsLimpios, empresaId],
     );
+
+    if (upd.affectedRows) {
+      const [nm] = await pool().query<any[]>(
+        `SELECT CONCAT(p.nombres,' ',p.apellidos) AS nombre
+           FROM inscripciones i JOIN participantes p ON p.id = i.participante_id
+          WHERE i.id IN (${placeholders}) AND i.empresa_id = ?`,
+        [...idsLimpios, empresaId],
+      );
+      const [est] = await pool().query<any[]>('SELECT nombre FROM estado_inscripcion WHERE id = ?', [estadoId]);
+      const estadoNombre = (est as any[])[0]?.nombre ?? String(estadoId);
+      const nombres = (nm as any[]).map(r => r.nombre);
+      const lista = nombres.slice(0, 5).join(', ') + (nombres.length > 5 ? ` y ${nombres.length - 5} más` : '');
+      auditoriaRepo.registrar({
+        empresaId, usuarioId: userId, accion: 'editar', entidad: 'inscripcion', entidadId: null,
+        entidadNombre: null,
+        descripcion: `Cambió a "${estadoNombre}" a ${upd.affectedRows} alumno(s): ${lista}`,
+        detalle: { estado: estadoNombre, total: upd.affectedRows },
+      });
+    }
     return upd.affectedRows ?? 0;
   },
 
   /** BORRA una inscripción, sus notas (cascada) y su certificado si lo tuviera
    *  (devolviendo el cupo y eliminando el PDF). */
-  async remove(tenantSlug: string, id: number): Promise<boolean> {
+  async remove(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const [prevRows] = await pool().query<any[]>(
+      `SELECT CONCAT(p.nombres,' ',p.apellidos) AS alumno, p.numero_documento AS doc, g.nombre_grupo AS aula
+         FROM inscripciones i
+         JOIN participantes p    ON p.id = i.participante_id
+         JOIN grupos_programas g ON g.id = i.grupo_id
+        WHERE i.id = ? AND i.empresa_id = ?`,
+      [id, empresaId],
+    );
+    const prev = (prevRows as any[])[0];
     const conn = await pool().getConnection();
     try {
       await conn.beginTransaction();
@@ -925,6 +1125,11 @@ export const inscripcionesRepo = {
       const [r] = await conn.query<any>('DELETE FROM inscripciones WHERE id = ? AND empresa_id = ?', [id, empresaId]);
       await conn.commit();
       borrarPdfs(urls);
+      if (r.affectedRows > 0) auditoriaRepo.registrar({
+        empresaId, usuarioId: userId, accion: 'eliminar', entidad: 'inscripcion', entidadId: id,
+        entidadNombre: prev?.alumno ?? null,
+        descripcion: `Eliminó la inscripción de ${prev ? `${prev.alumno} (${prev.doc})` : 'un alumno'}${prev?.aula ? ` en el aula "${prev.aula}"` : ''}`,
+      });
       return r.affectedRows > 0;
     } catch (e) {
       await conn.rollback();
@@ -998,19 +1203,29 @@ export const logosRepo = {
       [empresaId, dto.nombre ?? null, dto.imagen_logo, userId ?? null],
     );
     const [rows] = await pool().query<any[]>('SELECT * FROM logos WHERE id = ?', [result.insertId]);
-    return LogoEntity.fromRow(rows[0]);
+    const logo = LogoEntity.fromRow(rows[0]);
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'crear', entidad: 'logo', entidadId: logo.id, entidadNombre: logo.nombre ?? null,
+      descripcion: `Agregó el logo${logo.nombre ? ` "${logo.nombre}"` : ''}`,
+    });
+    return logo;
   },
 
-  async remove(tenantSlug: string, id: number): Promise<boolean> {
+  async remove(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
     // El logo default es obligatorio: no se puede eliminar.
     const [chk] = await pool().query<any[]>(
-      'SELECT es_default FROM logos WHERE id = ? AND empresa_id = ?', [id, empresaId],
+      'SELECT es_default, nombre FROM logos WHERE id = ? AND empresa_id = ?', [id, empresaId],
     );
     if ((chk as any[])[0]?.es_default) {
       throw new Error('LOGO_DEFAULT: El logo de la empresa es obligatorio en tu plan y no se puede eliminar.');
     }
+    const nombrePrev = (chk as any[])[0]?.nombre ?? null;
     const [r] = await pool().query<any>('UPDATE logos SET activo = 0 WHERE id = ? AND empresa_id = ?', [id, empresaId]);
+    if (r.affectedRows > 0) auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'eliminar', entidad: 'logo', entidadId: id, entidadNombre: nombrePrev,
+      descripcion: `Eliminó el logo${nombrePrev ? ` "${nombrePrev}"` : ''}`,
+    });
     return r.affectedRows > 0;
   },
 };
@@ -1035,12 +1250,23 @@ export const firmasRepo = {
       [empresaId, dto.nombre_autoridad, dto.cargo, dto.imagen_firma, userId ?? null],
     );
     const [rows] = await pool().query<any[]>('SELECT * FROM firmas WHERE id = ?', [result.insertId]);
-    return FirmaEntity.fromRow(rows[0]);
+    const firma = FirmaEntity.fromRow(rows[0]);
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'crear', entidad: 'firma', entidadId: firma.id, entidadNombre: firma.nombre_autoridad,
+      descripcion: `Agregó la firma de ${firma.nombre_autoridad}${firma.cargo ? ` (${firma.cargo})` : ''}`,
+    });
+    return firma;
   },
 
-  async remove(tenantSlug: string, id: number): Promise<boolean> {
+  async remove(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const [prevRows] = await pool().query<any[]>('SELECT nombre_autoridad FROM firmas WHERE id = ? AND empresa_id = ?', [id, empresaId]);
+    const nombrePrev = (prevRows as any[])[0]?.nombre_autoridad ?? null;
     const [r] = await pool().query<any>('UPDATE firmas SET activo = 0 WHERE id = ? AND empresa_id = ?', [id, empresaId]);
+    if (r.affectedRows > 0) auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'eliminar', entidad: 'firma', entidadId: id, entidadNombre: nombrePrev,
+      descripcion: `Eliminó la firma de ${nombrePrev ?? 'una autoridad'}`,
+    });
     return r.affectedRows > 0;
   },
 };
@@ -1139,6 +1365,15 @@ export const configRepo = {
       await pool().query(`INSERT INTO config_firmas (config_id, firma_id, orden) VALUES ?`, [vals]);
     }
 
+    const [pn] = await pool().query<any[]>('SELECT nombre FROM programas WHERE id = ? AND empresa_id = ?', [programaId, empresaId]);
+    const programa = (pn as any[])[0]?.nombre ?? null;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'config', entidadId: programaId, entidadNombre: programa,
+      descripcion: `Actualizó el diseño del certificado del programa "${programa ?? programaId}"${grupoId ? ' (diseño específico de un aula)' : ''}`
+        + ` · ${dto.logo_ids?.length ?? 0} logo(s), ${dto.firma_ids?.length ?? 0} firma(s)${dto.plantilla_url ? ', con plantilla' : ''}`,
+      detalle: { logos: dto.logo_ids?.length ?? 0, firmas: dto.firma_ids?.length ?? 0, plantilla: !!dto.plantilla_url, grupo_id: grupoId },
+    });
+
     return (await configRepo.findByPrograma(tenantSlug, programaId, grupoId))!;
   },
 
@@ -1172,7 +1407,7 @@ export const configRepo = {
   },
 
   /** Elimina la config específica de un grupo → vuelve a heredar del programa */
-  async eliminarConfigGrupo(tenantSlug: string, programaId: number, grupoId: number): Promise<boolean> {
+  async eliminarConfigGrupo(tenantSlug: string, programaId: number, grupoId: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT id FROM configuraciones_certificado
@@ -1184,6 +1419,15 @@ export const configRepo = {
     await pool().query(`DELETE FROM config_logos  WHERE config_id = ?`, [configId]);
     await pool().query(`DELETE FROM config_firmas WHERE config_id = ?`, [configId]);
     await pool().query(`DELETE FROM configuraciones_certificado WHERE id = ?`, [configId]);
+
+    const [pn] = await pool().query<any[]>('SELECT nombre FROM programas WHERE id = ? AND empresa_id = ?', [programaId, empresaId]);
+    const [gn] = await pool().query<any[]>('SELECT nombre_grupo FROM grupos_programas WHERE id = ? AND empresa_id = ?', [grupoId, empresaId]);
+    const programa = (pn as any[])[0]?.nombre ?? null;
+    const aula = (gn as any[])[0]?.nombre_grupo ?? null;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'eliminar', entidad: 'config', entidadId: programaId, entidadNombre: programa,
+      descripcion: `Quitó el diseño específico del aula "${aula ?? grupoId}" del programa "${programa ?? programaId}" (vuelve a heredar del programa)`,
+    });
     return true;
   },
 };
@@ -1225,16 +1469,22 @@ export const emisionRepo = {
     return (rows as any[]).map(CertificadoEntity.fromRow);
   },
 
-  async generar(tenantSlug: string, inscripcionId: number, userId?: number): Promise<CertificadoEntity> {
-    const empresaId = await getEmpresaId(tenantSlug);
-
-    const [insc] = await pool().query<any[]>(
+  /**
+   * Inserta el certificado de una inscripción dentro de una transacción YA abierta,
+   * SIN tocar el crédito. Valida: aprobado (estado 3), sin duplicado vigente y que el
+   * programa tenga diseño configurado (si no → FALTA_CONFIG). Devuelve id y código.
+   * Lo usan `generar` (individual) y `generarLote` (tanda) para compartir la lógica.
+   */
+  async _emitirCertEnTx(
+    conn: PoolConnection, tenantSlug: string, empresaId: number, inscripcionId: number, userId?: number,
+  ): Promise<{ certId: number; codigo: string }> {
+    const [insc] = await conn.query<any[]>(
       'SELECT * FROM inscripciones WHERE id = ? AND empresa_id = ? AND estado_id = 3',
       [inscripcionId, empresaId],
     );
     if (!(insc as any[]).length) throw new Error('Inscripción no encontrada o el participante no está aprobado');
 
-    const [dup] = await pool().query<any[]>(
+    const [dup] = await conn.query<any[]>(
       'SELECT id FROM certificados WHERE inscripcion_id = ? AND estado_id != 2',
       [inscripcionId],
     );
@@ -1242,7 +1492,7 @@ export const emisionRepo = {
 
     // Bloquear emisión si el programa/grupo no tiene diseño configurado.
     const grupoId = (insc as any[])[0].grupo_id;
-    const [progRows] = await pool().query<any[]>('SELECT programa_id FROM grupos_programas WHERE id = ?', [grupoId]);
+    const [progRows] = await conn.query<any[]>('SELECT programa_id FROM grupos_programas WHERE id = ?', [grupoId]);
     const programaId = (progRows as any[])[0]?.programa_id;
     const config = await configRepo.findByPrograma(tenantSlug, programaId, grupoId);
     const sinDiseno = !config || (!config.plantilla_url && (config.logos?.length ?? 0) === 0 && (config.firmas?.length ?? 0) === 0);
@@ -1251,31 +1501,16 @@ export const emisionRepo = {
     }
 
     const codigo = generarCodigo(empresaId);
+    const [result] = await conn.query<any>(
+      `INSERT INTO certificados (empresa_id, inscripcion_id, codigo_unico, fecha_emision, estado_id, user_crea_id)
+       VALUES (?, ?, ?, ?, 1, ?)`,
+      [empresaId, inscripcionId, codigo, new Date().toISOString().split('T')[0], userId ?? null],
+    );
+    return { certId: result.insertId, codigo };
+  },
 
-    // Transacción: insertar el certificado y consumir 1 del cupo del plan de forma atómica.
-    // `consumirCupo` bloquea la fila de consumo del mes (FOR UPDATE) y lanza SinPlanError
-    // si la empresa no tiene suscripción vigente; en ese caso el rollback deshace el INSERT.
-    // Si ya superó el cupo, igual emite pero lo cuenta como excedente (se cobra aparte).
-    const conn = await pool().getConnection();
-    let certId: number;
-    try {
-      await conn.beginTransaction();
-      const [result] = await conn.query<any>(
-        `INSERT INTO certificados (empresa_id, inscripcion_id, codigo_unico, fecha_emision, estado_id, user_crea_id)
-         VALUES (?, ?, ?, ?, 1, ?)`,
-        [empresaId, inscripcionId, codigo, new Date().toISOString().split('T')[0], userId ?? null],
-      );
-      certId = result.insertId;
-      await planRepo.consumirCupo(conn, empresaId);
-      await conn.commit();
-    } catch (e) {
-      await conn.rollback();
-      throw e;
-    } finally {
-      conn.release();
-    }
-
-    // Recuperar todos los datos del certificado recién creado
+  /** Recupera todos los datos (JOINs) de un certificado recién creado, para responder y generar PDF. */
+  async _cargarCertCompleto(certId: number): Promise<any> {
     const [rows] = await pool().query<any[]>(
       `SELECT c.*, prog.id AS programa_id,
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
@@ -1299,14 +1534,116 @@ export const emisionRepo = {
        WHERE c.id = ?`,
       [certId],
     );
-    const cert = (rows as any[])[0];
+    return (rows as any[])[0];
+  },
+
+  async generar(tenantSlug: string, inscripcionId: number, userId?: number, opts: { auditar?: boolean } = {}): Promise<CertificadoEntity> {
+    const empresaId = await getEmpresaId(tenantSlug);
+
+    // Transacción: insertar el certificado y consumir 1 crédito de forma atómica.
+    const conn = await pool().getConnection();
+    let certId: number;
+    try {
+      await conn.beginTransaction();
+      const r = await emisionRepo._emitirCertEnTx(conn, tenantSlug, empresaId, inscripcionId, userId);
+      certId = r.certId;
+      await planRepo.consumirCupo(conn, empresaId);   // 1 crédito, movimiento individual
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+
+    const cert = await emisionRepo._cargarCertCompleto(certId);
 
     // Generar el PDF en segundo plano (no bloquea la respuesta al frontend)
     setImmediate(() => generarPdfYGuardar(cert, tenantSlug).catch(err =>
-      console.error(`[PDF] Error generando ${codigo}:`, err.message),
+      console.error(`[PDF] Error generando ${cert.codigo_unico}:`, err.message),
     ));
 
+    // Auditoría: emisión individual.
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'emitir', entidad: 'certificado',
+      entidadId: certId, entidadNombre: cert.codigo_unico,
+      descripcion: `Emitió el certificado ${cert.codigo_unico} de ${cert.participante_nombre} (${cert.programa_nombre})`,
+    });
+
     return CertificadoEntity.fromRow(cert);
+  },
+
+  /**
+   * Emisión EN LOTE: emite una lista de inscripciones en UNA sola transacción y
+   * registra UN solo movimiento de crédito (-N) en vez de N de -1. En planes con
+   * saldo, emite hasta donde alcance (los que no entran se reportan como bloqueo
+   * 'creditos'); plan ilimitado emite todo. Por inscripción inválida (no aprobada,
+   * duplicada, FALTA_CONFIG) acumula el error y sigue con las demás.
+   */
+  async generarLote(
+    tenantSlug: string, inscripcionIds: number[], userId?: number,
+  ): Promise<{ emitidos: number; errores: Array<{ id: number; error: string }>; bloqueo: 'creditos' | null }> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const ids = Array.from(new Set(inscripcionIds.map(Number).filter(Boolean)));
+    if (ids.length === 0) return { emitidos: 0, errores: [], bloqueo: null };
+
+    const errores: Array<{ id: number; error: string }> = [];
+    const emitidosIds: number[] = [];
+    let bloqueo: 'creditos' | null = null;
+    let nombreAula: string | null = null;
+
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      const { saldo, ilimitado } = await planRepo.saldoCreditos(conn, empresaId);
+
+      for (const inscId of ids) {
+        // Sin plan ilimitado: parar cuando se agotó el saldo (el resto = bloqueo creditos).
+        if (!ilimitado && emitidosIds.length >= saldo) { bloqueo = 'creditos'; break; }
+        try {
+          const r = await emisionRepo._emitirCertEnTx(conn, tenantSlug, empresaId, inscId, userId);
+          emitidosIds.push(r.certId);
+        } catch (e) {
+          errores.push({ id: inscId, error: (e as Error).message });
+        }
+      }
+
+      if (emitidosIds.length > 0) {
+        const desc = emitidosIds.length === 1
+          ? 'Emisión de certificado'
+          : `Emisión de ${emitidosIds.length} certificados`;
+        await planRepo.consumirCreditos(conn, empresaId, emitidosIds.length, desc);
+      }
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+
+    // Fuera de la transacción: cargar datos + generar PDFs en background.
+    for (const certId of emitidosIds) {
+      const cert = await emisionRepo._cargarCertCompleto(certId);
+      if (!nombreAula) nombreAula = cert?.nombre_grupo ?? null;
+      if (cert) setImmediate(() => generarPdfYGuardar(cert, tenantSlug).catch(err =>
+        console.error(`[PDF] Error generando ${cert.codigo_unico}:`, err.message),
+      ));
+    }
+
+    // Auditoría: una sola entrada por la tanda.
+    if (emitidosIds.length > 0) {
+      const desc = emitidosIds.length === 1
+        ? `Emitió 1 certificado${nombreAula ? ` del aula "${nombreAula}"` : ''}`
+        : `Emitió ${emitidosIds.length} certificados${nombreAula ? ` del aula "${nombreAula}"` : ''}`;
+      auditoriaRepo.registrar({
+        empresaId, usuarioId: userId, accion: 'emitir', entidad: 'certificado',
+        entidadId: null, entidadNombre: nombreAula, descripcion: desc,
+        detalle: { emitidos: emitidosIds.length, errores: errores.length },
+      });
+    }
+
+    return { emitidos: emitidosIds.length, errores, bloqueo };
   },
 
   /** Regenera el PDF de un certificado existente (si cambias diseño, etc) */
@@ -1412,11 +1749,32 @@ export const emisionRepo = {
 
   async anular(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const info = await emisionRepo._infoCertParaAudit(empresaId, id);
     const [r] = await pool().query<any>(
       'UPDATE certificados SET estado_id = 2, user_actua_id = ? WHERE id = ? AND empresa_id = ?',
       [userId ?? null, id, empresaId],
     );
+    if (r.affectedRows > 0) auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'anular', entidad: 'certificado', entidadId: id, entidadNombre: info?.codigo ?? null,
+      descripcion: `Anuló el certificado ${info?.codigo ?? id}${info?.alumno ? ` de ${info.alumno}` : ''}${info?.programa ? ` (programa "${info.programa}"${info.aula ? `, aula "${info.aula}"` : ''})` : ''}`,
+    });
     return r.affectedRows > 0;
+  },
+
+  /** Datos mínimos (código + alumno) de un certificado para describir la auditoría. */
+  async _infoCertParaAudit(empresaId: number, id: number): Promise<{ codigo: string; alumno: string; programa: string | null; aula: string | null } | null> {
+    const [rows] = await pool().query<any[]>(
+      `SELECT c.codigo_unico AS codigo, CONCAT(p.nombres,' ',p.apellidos) AS alumno,
+              prog.nombre AS programa, g.nombre_grupo AS aula
+         FROM certificados c
+         JOIN inscripciones i    ON i.id = c.inscripcion_id
+         JOIN participantes p    ON p.id = i.participante_id
+         JOIN grupos_programas g ON g.id = i.grupo_id
+         JOIN programas prog     ON prog.id = g.programa_id
+        WHERE c.id = ? AND c.empresa_id = ?`,
+      [id, empresaId],
+    );
+    return (rows as any[])[0] ?? null;
   },
 
   /**
@@ -1425,6 +1783,7 @@ export const emisionRepo = {
    */
   async eliminar(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    const info = await emisionRepo._infoCertParaAudit(empresaId, id);
     const conn = await pool().getConnection();
     try {
       await conn.beginTransaction();
@@ -1445,6 +1804,10 @@ export const emisionRepo = {
         const abs = path.join(process.cwd(), urlRel.replace(/^\/+/, ''));
         fs.promises.unlink(abs).catch(() => { /* archivo ya no existe, ignorar */ });
       }
+      auditoriaRepo.registrar({
+        empresaId, usuarioId: userId, accion: 'eliminar', entidad: 'certificado', entidadId: id, entidadNombre: info?.codigo ?? null,
+        descripcion: `Eliminó el certificado ${info?.codigo ?? id}${info?.alumno ? ` de ${info.alumno}` : ''}${info?.programa ? ` (programa "${info.programa}"${info.aula ? `, aula "${info.aula}"` : ''})` : ''} · se devolvió 1 crédito`,
+      });
       return true;
     } catch (e) {
       await conn.rollback();

@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { inscripcionService } from './inscripcion.service';
 import { tid } from '../shared/router.helper';
 import { DatosAsociadosError } from '../shared/certificados.repository';
+import { planRepo } from '../planes/plan.repository';
 
 /** Id del usuario autenticado (lo pone jwtMiddleware en authUser.sub). */
 const uid = (req: Request): number | undefined => (req as any).authUser?.sub;
@@ -17,7 +18,7 @@ export async function createInscripcion(req: Request, res: Response): Promise<vo
     res.status(400).json({ error: 'participante_id y grupo_id son requeridos' }); return;
   }
   const fecha = fecha_inscripcion ?? new Date().toISOString().split('T')[0];
-  res.status(201).json(await inscripcionService.create(tid(req), { participante_id, grupo_id, fecha_inscripcion: fecha }));
+  res.status(201).json(await inscripcionService.create(tid(req), { participante_id, grupo_id, fecha_inscripcion: fecha }, uid(req)));
 }
 
 export async function inscribir(req: Request, res: Response): Promise<void> {
@@ -29,13 +30,13 @@ export async function inscribir(req: Request, res: Response): Promise<void> {
     tipo_documento_id, numero_documento: numero_documento.trim(),
     nombres: nombres.trim(), apellidos: apellidos.trim(),
     email, telefono, grupo_id, fecha_inscripcion,
-  }));
+  }, uid(req)));
 }
 
 export async function cambiarEstado(req: Request, res: Response): Promise<void> {
   const { estado_id } = req.body ?? {};
   if (!estado_id) { res.status(400).json({ error: 'estado_id es requerido' }); return; }
-  const updated = await inscripcionService.cambiarEstado(tid(req), Number(req.params.id), { estado_id });
+  const updated = await inscripcionService.cambiarEstado(tid(req), Number(req.params.id), { estado_id }, uid(req));
   if (!updated) { res.status(404).json({ error: 'Inscripción no encontrada' }); return; }
   res.json(updated);
 }
@@ -43,7 +44,7 @@ export async function cambiarEstado(req: Request, res: Response): Promise<void> 
 /** BORRA una inscripción (con protección: bloquea si ya tiene certificado emitido). */
 export async function eliminarInscripcion(req: Request, res: Response): Promise<void> {
   try {
-    const ok = await inscripcionService.remove(tid(req), Number(req.params.id));
+    const ok = await inscripcionService.remove(tid(req), Number(req.params.id), uid(req));
     if (!ok) { res.status(404).json({ error: 'Inscripción no encontrada' }); return; }
     res.status(204).send();
   } catch (e) {
@@ -57,6 +58,14 @@ export async function importarMasivo(req: Request, res: Response): Promise<void>
   const { grupo_id, emitir, participantes } = req.body ?? {};
   if (!grupo_id || !Array.isArray(participantes) || participantes.length === 0) {
     res.status(400).json({ error: 'grupo_id y participantes (lista no vacía) son requeridos' }); return;
+  }
+  // La carga masiva por Excel es una función de plan (Profesional o superior).
+  if (!(await planRepo.permiteCargaMasiva(tid(req)))) {
+    res.status(403).json({
+      error: 'Tu plan no incluye importación por Excel. Actualiza a Profesional o superior.',
+      code: 'PLAN_SIN_CARGA_MASIVA',
+    });
+    return;
   }
   res.json(await inscripcionService.importarMasivo(tid(req), Number(grupo_id), participantes, !!emitir, uid(req)));
 }

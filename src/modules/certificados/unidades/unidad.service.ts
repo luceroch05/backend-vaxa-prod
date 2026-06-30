@@ -5,5 +5,5 @@ export const unidadService = {
   listByPrograma: (tenantSlug: string, programaId: number)              => unidadesRepo.findByPrograma(tenantSlug, programaId),
   create:         (tenantSlug: string, dto: CreateUnidadDto, uid?: number) => unidadesRepo.create(tenantSlug, dto, uid),
   update:         (tenantSlug: string, id: number, dto: UpdateUnidadDto, uid?: number) => unidadesRepo.update(tenantSlug, id, dto, uid),
-  remove:         (tenantSlug: string, id: number)                       => unidadesRepo.remove(tenantSlug, id),
+  remove:         (tenantSlug: string, id: number, uid?: number)         => unidadesRepo.remove(tenantSlug, id, uid),
 };

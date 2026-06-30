@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { programaService } from './programa.service';
-import { tid } from '../shared/router.helper';
+import { tid, uid } from '../shared/router.helper';
 import { DatosAsociadosError } from '../shared/certificados.repository';
 
 export async function listProgramas(req: Request, res: Response): Promise<void> {
@@ -11,7 +11,7 @@ export async function listProgramas(req: Request, res: Response): Promise<void> 
 /** BORRA un programa por completo (con protección de certificados). */
 export async function eliminarPrograma(req: Request, res: Response): Promise<void> {
   try {
-    const ok = await programaService.remove(tid(req), Number(req.params.id));
+    const ok = await programaService.remove(tid(req), Number(req.params.id), uid(req));
     if (!ok) { res.status(404).json({ error: 'Programa no encontrado' }); return; }
     res.status(204).send();
   } catch (e) {
@@ -23,8 +23,7 @@ export async function eliminarPrograma(req: Request, res: Response): Promise<voi
 /** Archiva (desactiva) o reactiva un programa. Body: { activo: boolean }. */
 export async function setActivoPrograma(req: Request, res: Response): Promise<void> {
   const activo = req.body?.activo !== false;   // por defecto true (reactivar) salvo que manden false
-  const uid = (req as any).authUser?.sub;
-  const prog = await programaService.setActivo(tid(req), Number(req.params.id), activo, uid);
+  const prog = await programaService.setActivo(tid(req), Number(req.params.id), activo, uid(req));
   if (!prog) { res.status(404).json({ error: 'Programa no encontrado' }); return; }
   res.json(prog);
 }
@@ -43,11 +42,11 @@ export async function createPrograma(req: Request, res: Response): Promise<void>
   // Las horas académicas son OPCIONALES: si no vienen, se guarda 0.
   res.status(201).json(await programaService.create(tid(req), {
     tipo_programa_id, nombre, descripcion, horas_academicas: Number(horas_academicas) || 0,
-  }));
+  }, uid(req)));
 }
 
 export async function updatePrograma(req: Request, res: Response): Promise<void> {
-  const prog = await programaService.update(tid(req), Number(req.params.id), req.body ?? {});
+  const prog = await programaService.update(tid(req), Number(req.params.id), req.body ?? {}, uid(req));
   if (!prog) { res.status(404).json({ error: 'Programa no encontrado' }); return; }
   res.json(prog);
 }

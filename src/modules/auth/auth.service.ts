@@ -5,6 +5,7 @@ import { getPool } from '../../db/pool';
 import { revokeOtherSessions } from '../../realtime/session-socket';
 import type { LoginDto, LoginResponse, JwtPayload } from './auth.types';
 import { JWT_SECRET, JWT_EXPIRES_IN } from '../../config/jwt.config';
+import { auditoriaRepo } from '../certificados/auditoria/auditoria.repository';
 
 interface UsuarioRow {
   id: number;
@@ -18,7 +19,7 @@ interface UsuarioRow {
   empresa_activa: number;
 }
 
-export async function loginService(dto: LoginDto): Promise<LoginResponse> {
+export async function loginService(dto: LoginDto, ip?: string): Promise<LoginResponse> {
   const pool = getPool();
   if (!pool) throw new Error('Base de datos no configurada');
 
@@ -135,6 +136,15 @@ export async function loginService(dto: LoginDto): Promise<LoginResponse> {
   };
 
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions);
+
+  // Auditoría de inicio de sesión (solo para el producto de certificados; gateada por plan).
+  if (dto.producto === 'certificaciones') {
+    auditoriaRepo.registrar({
+      empresaId: usuario.empresa_id, usuarioId: usuario.id, accion: 'login', entidad: 'sesion',
+      descripcion: `${usuario.nombres} ${usuario.apellidos} inició sesión`,
+      ip: ip ?? null,
+    });
+  }
 
   return {
     token,

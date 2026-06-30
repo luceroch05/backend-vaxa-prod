@@ -14,6 +14,6 @@ export const configService = {
   congelarGrupo:       (tenantSlug: string, programaId: number, grupoId: number, uid?: number) =>
                           configRepo.congelarGrupo(tenantSlug, programaId, grupoId, uid),
 
-  eliminarConfigGrupo: (tenantSlug: string, programaId: number, grupoId: number) =>
-                          configRepo.eliminarConfigGrupo(tenantSlug, programaId, grupoId),
+  eliminarConfigGrupo: (tenantSlug: string, programaId: number, grupoId: number, uid?: number) =>
+                          configRepo.eliminarConfigGrupo(tenantSlug, programaId, grupoId, uid),
 };

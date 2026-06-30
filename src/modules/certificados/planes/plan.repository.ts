@@ -91,6 +91,29 @@ async function planEsIlimitado(conn: PoolConnection, empresaId: number): Promise
 }
 
 export const planRepo = {
+  /** ¿El plan vigente del tenant permite carga masiva por Excel? (Profesional+). */
+  async permiteCargaMasiva(tenantSlug: string): Promise<boolean> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT p.permite_carga_masiva
+         FROM empresas e JOIN planes p ON p.id = e.plan_actual_id
+        WHERE e.id = ?`,
+      [empresaId],
+    );
+    return rows.length > 0 && Number(rows[0].permite_carga_masiva) === 1;
+  },
+
+  /** ¿El plan vigente del tenant incluye auditoría? (Profesional+). */
+  async permiteAuditoria(empresaId: number): Promise<boolean> {
+    const [rows] = await pool().query<any[]>(
+      `SELECT p.permite_auditoria
+         FROM empresas e JOIN planes p ON p.id = e.plan_actual_id
+        WHERE e.id = ?`,
+      [empresaId],
+    );
+    return rows.length > 0 && Number(rows[0].permite_auditoria) === 1;
+  },
+
   /** Catálogo de planes activos (ordenados). */
   async listPlanes(): Promise<Plan[]> {
     const [rows] = await pool().query<any[]>(
@@ -237,35 +260,57 @@ export const planRepo = {
    * Lanza SinPlanError si la empresa no tiene suscripción vigente.
    */
   async consumirCupo(conn: PoolConnection, empresaId: number): Promise<void> {
-    // Plan ILIMITADO (creditos_incluidos = 0, ej. Corporativo): NO se bloquea por
-    // saldo, pero SÍ se registra el consumo (decrementa + movimiento) para tener
-    // seguimiento de cuántos certificados emite (el saldo puede quedar negativo;
-    // en la UI se muestra ∞, nunca el número). En planes normales sí bloquea.
-    const ilimitado = await planEsIlimitado(conn, empresaId);
+    // Emisión individual: consume 1 crédito con descripción individual.
+    await planRepo.consumirCreditos(conn, empresaId, 1, 'Emisión de certificado');
+  },
 
-    // Modelo de CRÉDITOS: cada certificado consume 1 crédito del saldo de la
-    // empresa. Bloquea la fila (FOR UPDATE) para evitar carreras. Sin saldo → 409.
+  /**
+   * Consume `cantidad` créditos del saldo de la empresa en UN solo movimiento.
+   * Lo usa la emisión individual (cantidad=1) y la emisión EN LOTE (cantidad=N),
+   * para que el ledger muestre una sola fila por tanda en vez de N filas de -1.
+   * DEBE correr dentro de una transacción: bloquea la fila (FOR UPDATE).
+   * Plan ILIMITADO (creditos_incluidos = 0, ej. Corporativo): NO se bloquea por
+   * saldo, pero SÍ registra el consumo (saldo puede quedar negativo; la UI muestra ∞).
+   * En planes normales, si no alcanza el saldo → SinCreditosError.
+   */
+  async consumirCreditos(conn: PoolConnection, empresaId: number, cantidad: number, descripcion: string): Promise<void> {
+    const n = Math.floor(Number(cantidad));
+    if (!Number.isFinite(n) || n <= 0) return;
+
+    const ilimitado = await planEsIlimitado(conn, empresaId);
     const [rows] = await conn.query<any[]>(
       'SELECT creditos_disponibles FROM empresas WHERE id = ? FOR UPDATE',
       [empresaId],
     );
     if (!rows.length) throw new SinPlanError();
     const saldo = Number(rows[0].creditos_disponibles ?? 0);
-    if (!ilimitado && saldo <= 0) throw new SinCreditosError();
+    if (!ilimitado && saldo < n) throw new SinCreditosError();
 
-    const nuevo = saldo - 1;
+    const nuevo = saldo - n;
     await conn.query('UPDATE empresas SET creditos_disponibles = ? WHERE id = ?', [nuevo, empresaId]);
     await conn.query(
       `INSERT INTO creditos_movimientos (empresa_id, tipo, cantidad, saldo_resultante, descripcion)
-       VALUES (?, 'consumo', -1, ?, 'Emisión de certificado')`,
-      [empresaId, nuevo],
+       VALUES (?, 'consumo', ?, ?, ?)`,
+      [empresaId, -n, nuevo, descripcion],
     );
+  },
+
+  /** Saldo de créditos disponible de la empresa (sin bloquear). Para calcular el lote. */
+  async saldoCreditos(conn: PoolConnection, empresaId: number): Promise<{ saldo: number; ilimitado: boolean }> {
+    const ilimitado = await planEsIlimitado(conn, empresaId);
+    const [rows] = await conn.query<any[]>(
+      'SELECT creditos_disponibles FROM empresas WHERE id = ? FOR UPDATE',
+      [empresaId],
+    );
+    if (!rows.length) throw new SinPlanError();
+    return { saldo: Number(rows[0].creditos_disponibles ?? 0), ilimitado };
   },
 
   /**
    * Recarga de CRÉDITOS (lado Vaxa): le suma `cantidad` créditos al saldo de la
-   * empresa (acumulables) al precio por crédito (S/2.70 c/IGV, base de los
-   * paquetes) y deja el cobro registrado en `pagos` (concepto excedente, pendiente).
+   * empresa (acumulables) al precio por crédito suelto escalonado (tarifario
+   * oficial 2026: 1–49 → S/3.00 · 50 o más → S/2.85 c/IGV; desde 100 conviene un
+   * paquete) y deja el cobro registrado en `pagos` (concepto excedente, pendiente).
    */
   async recargarCupo(
     empresaId: number,
@@ -275,7 +320,9 @@ export const planRepo = {
     const n = Math.floor(Number(cantidad));
     if (!Number.isFinite(n) || n <= 0) throw new Error('La cantidad debe ser un entero mayor a 0');
 
-    const PRECIO_CREDITO = 2.70;  // incluye IGV (precio por crédito suelto)
+    // Precio por crédito suelto, escalonado (tarifario oficial 2026, incluye IGV):
+    //   1–49 → S/3.00 · 50 o más → S/2.85 (a partir de 100 conviene un paquete).
+    const PRECIO_CREDITO = n >= 50 ? 2.85 : 3.00;
     // Si se pasa un monto total (ej. precio de paquete con descuento: 300→S/750,
     // 700→S/1500), se cobra ese; si no, se cobra al precio por crédito suelto.
     const monto = (montoOverride != null && Number.isFinite(Number(montoOverride)) && Number(montoOverride) >= 0)

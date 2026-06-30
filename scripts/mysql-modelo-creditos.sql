@@ -31,13 +31,13 @@ ALTER TABLE planes
 UPDATE planes SET
   nombre='Plan Básico', implementacion=300, mantenimiento_mensual=30, creditos_incluidos=100, usuarios_incluidos=1,
   precio_mensual=30, setup_inicial=300, limite_certificados_mes=0,
-  permite_carga_masiva=1, permite_diseno=0, permite_subdominio=0, permite_api=0, permite_metricas=0, permite_auditoria=0, muestra_pdf_publico=0
+  permite_carga_masiva=0, permite_diseno=0, permite_subdominio=0, permite_api=0, permite_metricas=0, permite_auditoria=0, muestra_pdf_publico=0
  WHERE slug='basico';
 
 UPDATE planes SET
   nombre='Plan Profesional', implementacion=650, mantenimiento_mensual=50, creditos_incluidos=300, usuarios_incluidos=3,
   precio_mensual=50, setup_inicial=650, limite_certificados_mes=0,
-  permite_carga_masiva=1, permite_diseno=1, permite_subdominio=0, permite_api=0, permite_metricas=1, permite_auditoria=0, muestra_pdf_publico=1
+  permite_carga_masiva=1, permite_diseno=1, permite_subdominio=0, permite_api=0, permite_metricas=1, permite_auditoria=1, muestra_pdf_publico=1
  WHERE slug='profesional';
 
 UPDATE planes SET

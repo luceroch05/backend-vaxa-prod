@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { unidadService } from './unidad.service';
-import { tid } from '../shared/router.helper';
+import { tid, uid } from '../shared/router.helper';
 
 export async function listUnidades(req: Request, res: Response): Promise<void> {
   const programaId = Number(req.query.programa_id);
@@ -13,18 +13,18 @@ export async function createUnidad(req: Request, res: Response): Promise<void> {
   if (!programa_id || !nombre?.trim()) {
     res.status(400).json({ error: 'programa_id y nombre son requeridos' }); return;
   }
-  res.status(201).json(await unidadService.create(tid(req), { programa_id, nombre: nombre.trim(), orden }));
+  res.status(201).json(await unidadService.create(tid(req), { programa_id, nombre: nombre.trim(), orden }, uid(req)));
 }
 
 export async function updateUnidad(req: Request, res: Response): Promise<void> {
   const { nombre, orden } = req.body ?? {};
-  const u = await unidadService.update(tid(req), Number(req.params.id), { nombre, orden });
+  const u = await unidadService.update(tid(req), Number(req.params.id), { nombre, orden }, uid(req));
   if (!u) { res.status(404).json({ error: 'Unidad no encontrada' }); return; }
   res.json(u);
 }
 
 export async function deleteUnidad(req: Request, res: Response): Promise<void> {
-  const ok = await unidadService.remove(tid(req), Number(req.params.id));
+  const ok = await unidadService.remove(tid(req), Number(req.params.id), uid(req));
   if (!ok) { res.status(404).json({ error: 'Unidad no encontrada' }); return; }
   res.status(204).send();
 }

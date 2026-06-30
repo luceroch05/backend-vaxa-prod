@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { configService } from './config.service';
-import { tid } from '../shared/router.helper';
+import { tid, uid } from '../shared/router.helper';
 
 export async function getConfig(req: Request, res: Response): Promise<void> {
   const grupoId = req.query.grupo_id ? Number(req.query.grupo_id) : 0;
@@ -17,7 +17,7 @@ export async function upsertConfig(req: Request, res: Response): Promise<void> {
     grupo_id:           grupo_id ?? 0,
     logo_ids:  Array.isArray(logo_ids)  ? logo_ids  : [],
     firma_ids: Array.isArray(firma_ids) ? firma_ids : [],
-  }));
+  }, uid(req)));
 }
 
 /** Devuelve la lista de grupo_ids que tienen config propia para ese programa */
@@ -32,6 +32,7 @@ export async function congelarGrupo(req: Request, res: Response): Promise<void> 
     tid(req),
     Number(req.params.programaId),
     Number(req.params.grupoId),
+    uid(req),
   );
   if (!cfg) { res.status(404).json({ error: 'Programa sin configuración base' }); return; }
   res.json(cfg);
@@ -43,6 +44,7 @@ export async function eliminarConfigGrupo(req: Request, res: Response): Promise<
     tid(req),
     Number(req.params.programaId),
     Number(req.params.grupoId),
+    uid(req),
   );
   if (!ok) { res.status(404).json({ error: 'Configuración del grupo no encontrada' }); return; }
   res.status(204).send();

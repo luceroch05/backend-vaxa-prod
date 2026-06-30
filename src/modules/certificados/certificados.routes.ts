@@ -9,11 +9,12 @@ import { listInscripciones, createInscripcion, cambiarEstado, cambiarEstadoMasiv
 import { listLogos, createLogo, deleteLogo }                         from './logos/logo.controller';
 import { listFirmas, createFirma, deleteFirma }                      from './firmas/firma.controller';
 import { getConfig, upsertConfig, listGruposConConfig, congelarGrupo, eliminarConfigGrupo } from './config/config.controller';
-import { listCertificados, generarCertificado, anularCertificado, eliminarCertificado, regenerarPDF, previewCertificado,descargarZipGrupo, descargarZipPorIds, } from './emision/emision.controller';
+import { listCertificados, generarCertificado, generarLote, anularCertificado, eliminarCertificado, regenerarPDF, previewCertificado,descargarZipGrupo, descargarZipPorIds, } from './emision/emision.controller';
 import { listUnidades, createUnidad, updateUnidad, deleteUnidad } from './unidades/unidad.controller';
 import { getNotasGrupo, guardarNotas } from './notas/nota.controller';
 import { getCreditos, getMovimientos } from './creditos/credito.controller';
 import { listPlanes, getEstadoPlan } from './planes/plan.controller';
+import { getAuditoria } from './auditoria/auditoria.controller';
 
 const router = Router();
 
@@ -85,6 +86,7 @@ router.put('/notas/inscripcion/:inscripcionId', w(guardarNotas));           // g
 router.get('/emision',                          w(listCertificados));
 router.get('/emision/preview/:inscripcionId',   w(previewCertificado));      // vista previa PDF (no emite)
 router.post('/emision/generar/:inscripcionId',  w(generarCertificado));
+router.post('/emision/lote',                    w(generarLote));             // emite varias → UN solo movimiento de crédito
 router.patch('/emision/:id/anular',             w(anularCertificado));
 router.delete('/emision/:id',                   w(eliminarCertificado));     // elimina y DEVUELVE crédito
 router.post('/emision/:id/regenerar-pdf',       w(regenerarPDF));
@@ -98,5 +100,8 @@ router.get('/creditos/movimientos',             w(getMovimientos));
 // Planes (suscripción + cupo mensual de la propia empresa)
 router.get('/planes',                           w(listPlanes));              // catálogo
 router.get('/planes/estado',                    w(getEstadoPlan));           // plan vigente + consumo del mes
+
+// Auditoría (solo ADMINISTRADOR de la empresa; gateada a planes Profesional+)
+router.get('/auditoria',                        w(getAuditoria));
 
 export const certificadosRoutes = router;

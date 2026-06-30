@@ -10,3 +10,6 @@ export const tid = (req: Request): string => {
   if (!slug) throw new Error('x-tenant-id header requerido');
   return slug;
 };
+
+/** Id del usuario autenticado (lo pone jwtMiddleware en authUser.sub). Para auditoría. */
+export const uid = (req: Request): number | undefined => (req as any).authUser?.sub;

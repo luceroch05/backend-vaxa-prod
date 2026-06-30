@@ -16,7 +16,8 @@ export async function loginController(req: Request, res: Response): Promise<void
   }
 
   try {
-    const result = await loginService({ correo, contrasena, empresa, producto });
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip;
+    const result = await loginService({ correo, contrasena, empresa, producto }, ip);
     res.json(result);
   } catch (err) {
     if (err instanceof AuthError) {
