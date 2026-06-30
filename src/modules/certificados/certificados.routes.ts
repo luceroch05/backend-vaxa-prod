@@ -15,6 +15,8 @@ import { getNotasGrupo, guardarNotas } from './notas/nota.controller';
 import { getCreditos, getMovimientos } from './creditos/credito.controller';
 import { listPlanes, getEstadoPlan } from './planes/plan.controller';
 import { getAuditoria } from './auditoria/auditoria.controller';
+import { getReportes, getReporteCertificados } from './reportes/reportes.controller';
+import { soloAdmin } from './shared/rol.guard';
 
 const router = Router();
 
@@ -25,25 +27,25 @@ router.get('/catalogos',                        w(getCatalogos));
 router.get('/programas',                        w(listProgramas));
 router.get('/programas/:id',                    w(getPrograma));
 router.post('/programas',                       w(createPrograma));
-router.patch('/programas/:id/activo',           w(setActivoPrograma));       // archivar/reactivar
-router.delete('/programas/:id',                 w(eliminarPrograma));        // borrar (con protección)
-router.patch('/programas/:id',                  w(updatePrograma));
+router.patch('/programas/:id/activo', soloAdmin, w(setActivoPrograma));      // archivar/reactivar
+router.delete('/programas/:id',       soloAdmin, w(eliminarPrograma));       // borrar (con protección)
+router.patch('/programas/:id',        soloAdmin, w(updatePrograma));         // editar
 
 // Grupos
 router.get('/grupos',                           w(listGrupos));
 router.get('/grupos/:id',                       w(getGrupo));
 router.post('/grupos',                          w(createGrupo));
-router.patch('/grupos/:id/activo',              w(setActivoGrupo));          // archivar/reactivar aula
-router.delete('/grupos/:id',                    w(eliminarGrupo));           // borrar aula (con protección)
+router.patch('/grupos/:id/activo',    soloAdmin, w(setActivoGrupo));         // archivar/reactivar aula
+router.delete('/grupos/:id',          soloAdmin, w(eliminarGrupo));          // borrar aula (con protección)
 
 // Participantes
 router.get('/participantes',                    w(listParticipantes));
 router.get('/participantes/buscar',             w(buscarParticipante));      // ?documento=XXXX (autocompletar)
 router.get('/participantes/:id',                w(getParticipante));
 router.post('/participantes',                   w(createParticipante));
-router.patch('/participantes/:id/activo',       w(setActivoParticipante));   // archivar/reactivar estudiante
-router.patch('/participantes/:id',              w(actualizarParticipante));  // editar datos del estudiante
-router.delete('/participantes/:id',             w(eliminarParticipante));    // borrar estudiante (con protección)
+router.patch('/participantes/:id/activo', soloAdmin, w(setActivoParticipante));  // archivar/reactivar estudiante (solo admin)
+router.patch('/participantes/:id',                  w(actualizarParticipante)); // editar datos del estudiante (admision SÍ)
+router.delete('/participantes/:id',       soloAdmin, w(eliminarParticipante));   // borrar estudiante (solo admin)
 
 // Inscripciones
 router.get('/inscripciones',                    w(listInscripciones));
@@ -52,30 +54,30 @@ router.post('/inscripciones/inscribir',         w(inscribir));               // 
 router.post('/inscripciones/importar',          w(importarMasivo));          // carga masiva por Excel (inscribe / opcional emite)
 router.patch('/inscripciones/estado-masivo',    w(cambiarEstadoMasivo));      // aprobar/cambiar varias a la vez
 router.patch('/inscripciones/:id/estado',       w(cambiarEstado));
-router.delete('/inscripciones/:id',             w(eliminarInscripcion));     // borrar inscripción (con protección)
+router.delete('/inscripciones/:id',   soloAdmin, w(eliminarInscripcion));    // borrar inscripción (con protección)
 
-// Logos
+// Logos (admision SÍ puede crear y eliminar logos)
 router.get('/logos',                            w(listLogos));
 router.post('/logos',                           w(createLogo));
 router.delete('/logos/:id',                     w(deleteLogo));
 
-// Firmas
+// Firmas (admision SÍ puede crear y eliminar firmas)
 router.get('/firmas',                           w(listFirmas));
 router.post('/firmas',                          w(createFirma));
 router.delete('/firmas/:id',                    w(deleteFirma));
 
-// Config
+// Config / diseño del certificado (admision SÍ puede configurar plantilla/logos/firmas)
 router.get('/config/:programaId',                          w(getConfig));               // ?grupo_id=N (opcional)
 router.put('/config/:programaId',                          w(upsertConfig));            // body.grupo_id (opcional, default 0)
 router.get('/config/:programaId/grupos',                   w(listGruposConConfig));     // lista grupos con config propia
 router.post('/config/:programaId/congelar/:grupoId',       w(congelarGrupo));           // congela config actual para un grupo
 router.delete('/config/:programaId/grupo/:grupoId',        w(eliminarConfigGrupo));     // elimina override del grupo
 
-// Unidades (plan del programa)
+// Unidades (admision SÍ puede crear y editar; borrar solo admin)
 router.get('/unidades',                         w(listUnidades));            // ?programa_id=N
 router.post('/unidades',                        w(createUnidad));
-router.patch('/unidades/:id',                   w(updateUnidad));
-router.delete('/unidades/:id',                  w(deleteUnidad));
+router.patch('/unidades/:id',                   w(updateUnidad));            // editar
+router.delete('/unidades/:id',        soloAdmin, w(deleteUnidad));           // borrar (solo admin)
 
 // Notas
 router.get('/notas/grupo/:grupoId',             w(getNotasGrupo));           // matriz del grupo
@@ -87,8 +89,8 @@ router.get('/emision',                          w(listCertificados));
 router.get('/emision/preview/:inscripcionId',   w(previewCertificado));      // vista previa PDF (no emite)
 router.post('/emision/generar/:inscripcionId',  w(generarCertificado));
 router.post('/emision/lote',                    w(generarLote));             // emite varias → UN solo movimiento de crédito
-router.patch('/emision/:id/anular',             w(anularCertificado));
-router.delete('/emision/:id',                   w(eliminarCertificado));     // elimina y DEVUELVE crédito
+router.patch('/emision/:id/anular',   soloAdmin, w(anularCertificado));      // solo administrador
+router.delete('/emision/:id',         soloAdmin, w(eliminarCertificado));    // elimina y DEVUELVE crédito (solo admin)
 router.post('/emision/:id/regenerar-pdf',       w(regenerarPDF));
 router.get('/emision/grupo/:grupoId/zip',w(descargarZipGrupo),
 );
@@ -103,5 +105,9 @@ router.get('/planes/estado',                    w(getEstadoPlan));           // 
 
 // Auditoría (solo ADMINISTRADOR de la empresa; gateada a planes Profesional+)
 router.get('/auditoria',                        w(getAuditoria));
+
+// Reportes / métricas (solo ADMINISTRADOR; gateados a planes Profesional+)
+router.get('/reportes',               soloAdmin, w(getReportes));
+router.get('/reportes/certificados',  soloAdmin, w(getReporteCertificados));
 
 export const certificadosRoutes = router;

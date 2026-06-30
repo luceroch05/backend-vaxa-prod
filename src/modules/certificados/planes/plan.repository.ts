@@ -114,6 +114,18 @@ export const planRepo = {
     return rows.length > 0 && Number(rows[0].permite_auditoria) === 1;
   },
 
+  /** ¿El plan vigente del tenant incluye reportes/métricas? (Profesional+). */
+  async permiteMetricas(tenantSlug: string): Promise<boolean> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT p.permite_metricas
+         FROM empresas e JOIN planes p ON p.id = e.plan_actual_id
+        WHERE e.id = ?`,
+      [empresaId],
+    );
+    return rows.length > 0 && Number(rows[0].permite_metricas) === 1;
+  },
+
   /** Catálogo de planes activos (ordenados). */
   async listPlanes(): Promise<Plan[]> {
     const [rows] = await pool().query<any[]>(
@@ -334,14 +346,9 @@ export const planRepo = {
     try {
       await conn.beginTransaction();
 
-      // Suscripción vigente (para vincular el pago). Tolerante si no la hay.
-      const [sus] = await conn.query<any[]>(
-        `SELECT id AS suscripcion_id FROM empresa_suscripcion
-          WHERE empresa_id = ? AND estado_id = 1 ORDER BY id DESC LIMIT 1`,
-        [empresaId],
-      );
-
-      // Suma los créditos al saldo (acumulables) + movimiento en el ledger.
+      // SOLO suma los créditos al saldo (acumulables) + movimiento en el ledger.
+      // NO genera pago ni comprobante: el cobro/comprobante se registra aparte al
+      // hacer una "Nueva venta". Aquí únicamente se recarga el saldo del sistema.
       const [emp] = await conn.query<any[]>(
         'SELECT creditos_disponibles FROM empresas WHERE id = ? FOR UPDATE', [empresaId],
       );
@@ -357,17 +364,6 @@ export const planRepo = {
          VALUES (?, 'recarga', ?, ?, 'Recarga de créditos')`,
         [empresaId, n, nuevoSaldo],
       );
-
-      // Deja el cobro registrado (pendiente).
-      try {
-        await conn.query(
-          `INSERT INTO pagos (empresa_id, suscripcion_id, concepto_id, monto, estado_id)
-           VALUES (?, ?, 3, ?, 1)`,
-          [empresaId, sus[0]?.suscripcion_id ?? null, monto],
-        );
-      } catch (e) {
-        console.warn('[planes] no se pudo registrar el pago de la recarga:', (e as Error).message);
-      }
 
       await conn.commit();
       return { agregados: n, precio_unitario: precioUnitario, monto };
