@@ -14,6 +14,8 @@ import { tenantMatchMiddleware } from './middleware/tenant-match.middleware';
 import { requireRootTenant } from './middleware/require-root-tenant.middleware';
 import { creditosAdminRoutes } from './modules/admin/creditos.admin.routes';
 import { adminRoutes } from './modules/admin/admin.routes';
+import { cotizacionRoutes } from './modules/cotizaciones/cotizacion.routes';
+import { tarifarioRoutes } from './modules/tarifario/tarifario.routes';
 import { authRoutes } from './modules/auth/auth.routes';
 import { backofficeRoutes } from './modules/backoffice/backoffice.routes';
 import { pacientesRoutes } from './modules/pacientes/pacientes.routes';
@@ -114,8 +116,10 @@ app.get(`${BASE_PATH}/public/certificado/:tenantSlug/:codigo`, publicLimiter,
 app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, certificadosRoutes);
 
 /** Administración Vaxa: JWT + solo tenant raíz (créditos, empresas y usuarios de todas las empresas) */
-app.use(`${BASE_PATH}/api/admin/creditos`, jwtMiddleware, requireRootTenant, creditosAdminRoutes);
-app.use(`${BASE_PATH}/api/admin`,          jwtMiddleware, requireRootTenant, adminRoutes);
+app.use(`${BASE_PATH}/api/admin/creditos`,      jwtMiddleware, requireRootTenant, creditosAdminRoutes);
+app.use(`${BASE_PATH}/api/admin/cotizaciones`,  jwtMiddleware, requireRootTenant, cotizacionRoutes);
+app.use(`${BASE_PATH}/api/admin/tarifario`,     jwtMiddleware, requireRootTenant, tarifarioRoutes);
+app.use(`${BASE_PATH}/api/admin`,               jwtMiddleware, requireRootTenant, adminRoutes);
 
 /** Rutas antiguas: tenant middleware solo para las rutas que lo necesitan */
 app.use(`${BASE_PATH}/api/backoffice`, tenantMiddleware, backofficeRoutes);
