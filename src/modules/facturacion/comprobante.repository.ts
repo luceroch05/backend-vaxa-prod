@@ -4,6 +4,7 @@
  * guardar veredicto + CDR) y las consultas para la UI de sistemas-vaxa.
  */
 import { pool } from '../certificados/shared/db.helper';
+import { cuotasVencidas } from '../certificados/planes/mantenimiento.helper';
 import { construirFacturaXml, calcularTotales } from './ubl/factura.builder';
 import { construirNotaXml, TipoNota } from './ubl/nota.builder';
 import { construirResumenXml } from './ubl/resumen.builder';
@@ -34,6 +35,7 @@ export interface VentaInput {
   descuento?: { tipo: 'monto' | 'pct'; valor: number };
   tipoComprobante?: TipoComprobante;  // default 01 factura
   registrarPago?: boolean;            // registrar el pago (default true)
+  marcarActivacionUsuarios?: number[]; // usuarios cuya activación (S/50) se cobra en esta venta
 }
 
 export interface EmitirInput {
@@ -388,17 +390,16 @@ export const comprobanteRepo = {
     const f = input.tipoComprobante === 'NV' ? 1 : 1 + igvPct / 100;
     if (!input.items?.length) throw new Error('La venta no tiene líneas. Agrega al menos un producto.');
 
-    // Suscripción vigente (para vincular el pago y renovar si corresponde). Tolerante.
+    // Suscripción vigente (para vincular el pago y avanzar el mantenimiento). Tolerante.
     const [ss] = await pool().query<any[]>(
-      `SELECT s.id AS suscripcion_id, ci.meses_vigencia
+      `SELECT s.id AS suscripcion_id, s.fecha_inicio, s.fecha_fin, p.mantenimiento_mensual
          FROM empresa_suscripcion s
-         JOIN ciclo_facturacion ci ON ci.id = s.ciclo_id
+         JOIN planes p ON p.id = s.plan_id
         WHERE s.empresa_id = ? AND s.estado_id = 1
         ORDER BY s.id DESC LIMIT 1`,
       [input.empresaId],
     );
     const suscripcionId = ss[0]?.suscripcion_id ?? null;
-    const mesesVigencia = Number(ss[0]?.meses_vigencia ?? 1);
 
     // ── Líneas libres → ItemComprobante (precio CON IGV → valor SIN IGV) ──
     const items: ItemComprobante[] = input.items.map((it) => ({
@@ -459,14 +460,30 @@ export const comprobanteRepo = {
       );
     }
 
-    // ── Renovar la suscripción si alguna línea es mantenimiento ──
+    // ── Mantenimiento pagado → avanzar "pagado hasta" al último fin de mes vencido ──
+    // (modelo Leonardo: el mantenimiento se salda por cuotas de fin de mes).
     if (renueva && suscripcionId) {
+      const vencidas = cuotasVencidas({
+        fechaInicio: ss[0].fecha_inicio,
+        pagadoHasta: ss[0].fecha_fin,
+        mantenimientoMensual: Number(ss[0].mantenimiento_mensual) || 0,
+        hasta: new Date(),
+      });
+      if (vencidas.length) {
+        await pool().query(
+          `UPDATE empresa_suscripcion SET fecha_fin = ? WHERE id = ?`,
+          [vencidas[vencidas.length - 1].fechaCorte, suscripcionId],
+        );
+      }
+    }
+
+    // ── Marcar la activación (S/50 pago único) de los usuarios adicionales cobrados ──
+    const activar = (input.marcarActivacionUsuarios ?? []).filter((n) => Number.isInteger(n) && n > 0);
+    if (activar.length) {
       await pool().query(
-        `UPDATE empresa_suscripcion
-            SET fecha_fin = DATE_ADD(GREATEST(fecha_fin, CURDATE()), INTERVAL ? MONTH)
-          WHERE id = ?`,
-        [mesesVigencia, suscripcionId],
-      );
+        `UPDATE usuarios SET activacion_cobrada = 1 WHERE id IN (${activar.map(() => '?').join(',')})`,
+        activar,
+      ).catch(() => { /* columna aún no migrada: se ignora */ });
     }
 
     return { comprobante, descuento, total: totalNeto, creditosAgregados: creditosTotal };

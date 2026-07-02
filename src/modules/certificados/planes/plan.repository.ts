@@ -1,6 +1,7 @@
 import type { PoolConnection } from 'mysql2/promise';
 import { pool, getEmpresaId } from '../shared/db.helper';
-import { Plan, PlanEntity, EstadoPlan, ConsumoMes, Cobranza, CreditosSaldo } from './plan.entity';
+import { Plan, PlanEntity, EstadoPlan, ConsumoMes, Cobranza, CreditosSaldo, ResumenCobro, LineaCobro } from './plan.entity';
+import { cuotasMantenimiento, cuotasVencidas, mantenimientoUsuarioMes, estadoCobranzaMant } from './mantenimiento.helper';
 import { comprobanteRepo } from '../../facturacion/comprobante.repository';
 import { getSunatConfig } from '../../facturacion/sunat/sunat.config';
 import { SinCreditosError } from '../shared/creditos.repository';
@@ -59,6 +60,29 @@ export function calcularCobranza(fechaFin: Date | string): Cobranza {
     dias_para_vencer: diasParaVencer,
     estado_cobranza: estado,
   };
+}
+
+let _ensuredActivacion = false;
+/**
+ * Garantiza (una sola vez, en runtime) la columna `usuarios.activacion_cobrada`
+ * sin stored procedures ni migración manual: revisa information_schema y, si
+ * falta, la agrega marcando a los usuarios existentes como ya activados
+ * (grandfather: no se les cobra activación retroactiva).
+ */
+async function ensureActivacionCobrada(): Promise<void> {
+  if (_ensuredActivacion) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usuarios'
+        AND COLUMN_NAME = 'activacion_cobrada' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query(
+      `ALTER TABLE usuarios ADD COLUMN activacion_cobrada TINYINT(1) NOT NULL DEFAULT 0 AFTER activo`,
+    );
+    await pool().query(`UPDATE usuarios SET activacion_cobrada = 1`);
+  }
+  _ensuredActivacion = true;
 }
 
 /** Error tipado: la empresa no tiene una suscripción vigente (no puede emitir). */
@@ -161,11 +185,15 @@ export const planRepo = {
           WHERE empresa_id = ? AND estado_id = 1`,
         [empresaId],
       );
-      // Crear la nueva, vigente desde hoy según el ciclo.
+      // Crear la nueva. Modelo Leonardo (mantenimiento a fin de mes):
+      //   fecha_inicio = hoy (implementación / cambio de plan) → fija el prorrateo.
+      //   fecha_fin    = "mantenimiento pagado hasta" = fin del mes ANTERIOR, así
+      //                  el mes actual queda como 1ra cuota pendiente (prorrateada).
+      void meses; // el ciclo ya no fija la vigencia; el mantenimiento es mensual (fin de mes)
       await conn.query(
         `INSERT INTO empresa_suscripcion (empresa_id, plan_id, ciclo_id, estado_id, fecha_inicio, fecha_fin)
-         VALUES (?, ?, ?, 1, CURDATE(), DATE_ADD(CURDATE(), INTERVAL ? MONTH))`,
-        [empresaId, planId, cicloId, meses],
+         VALUES (?, ?, ?, 1, CURDATE(), LAST_DAY(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)))`,
+        [empresaId, planId, cicloId],
       );
       // Puntero rápido al plan vigente.
       await conn.query('UPDATE empresas SET plan_actual_id = ? WHERE id = ?', [planId, empresaId]);
@@ -256,7 +284,12 @@ export const planRepo = {
             estado:       sus[0].estado,
             fecha_inicio: aYmd(sus[0].fecha_inicio)!,
             fecha_fin:    aYmd(sus[0].fecha_fin)!,
-            ...calcularCobranza(sus[0].fecha_fin),
+            ...estadoCobranzaMant({
+              fechaInicio: sus[0].fecha_inicio,
+              pagadoHasta: sus[0].fecha_fin,
+              mantenimientoMensual: Number(plan?.mantenimiento_mensual) || 0,
+              hasta: new Date(),
+            }),
           }
         : null,
       consumo,
@@ -407,7 +440,7 @@ export const planRepo = {
     const [rows] = await pool().query<any[]>(
       `SELECT e.id AS empresa_id, e.razon_social, e.tenant_slug, e.activo,
               s.id AS suscripcion_id, s.fecha_inicio, s.fecha_fin,
-              c.nombre AS ciclo, p.nombre AS plan, p.precio_mensual,
+              c.nombre AS ciclo, p.nombre AS plan, p.precio_mensual, p.mantenimiento_mensual,
               (SELECT MAX(pg.fecha_pago) FROM pagos pg
                  WHERE pg.empresa_id = e.id AND pg.concepto_id = 1 AND pg.estado_id = 2) AS ultimo_pago
          FROM empresas e
@@ -432,7 +465,14 @@ export const planRepo = {
         fecha_inicio: aYmd(r.fecha_inicio),
         fecha_fin:    aYmd(r.fecha_fin),
         ultimo_pago:  aYmd(r.ultimo_pago),
-        cobranza:     r.fecha_fin ? calcularCobranza(r.fecha_fin) : null,
+        cobranza:     r.fecha_fin
+          ? estadoCobranzaMant({
+              fechaInicio: r.fecha_inicio,
+              pagadoHasta: r.fecha_fin,
+              mantenimientoMensual: Number(r.mantenimiento_mensual) || 0,
+              hasta: new Date(),
+            })
+          : null,
       }))
       // Urgencia primero: sin plan → vencido → por_vencer → vigente; dentro, menos días primero.
       .sort((a, b) => urgencia(a) - urgencia(b));
@@ -458,8 +498,8 @@ export const planRepo = {
 
       // Suscripción activa más reciente (aunque ya haya vencido por fecha).
       const [sus] = await conn.query<any[]>(
-        `SELECT s.id, s.fecha_fin, s.precio_pactado,
-                ci.meses_pago, ci.meses_vigencia, p.precio_mensual, p.nombre AS plan_nombre
+        `SELECT s.id, s.fecha_inicio, s.fecha_fin, s.precio_pactado,
+                ci.meses_pago, p.precio_mensual, p.mantenimiento_mensual, p.nombre AS plan_nombre
            FROM empresa_suscripcion s
            JOIN ciclo_facturacion ci ON ci.id = s.ciclo_id
            JOIN planes p             ON p.id  = s.plan_id
@@ -474,7 +514,6 @@ export const planRepo = {
       const monto = opts.monto != null
         ? Number(opts.monto)
         : (s.precio_pactado != null ? Number(s.precio_pactado) : Number(s.precio_mensual) * Number(s.meses_pago));
-      const meses = Number(s.meses_vigencia);
       montoPagado = monto;
       planNombre = s.plan_nombre ?? 'plan';
 
@@ -496,18 +535,23 @@ export const planRepo = {
         pagoId = insPago.insertId;
       }
 
-      // Renovar: encadena desde fecha_fin si sigue vigente, o desde hoy si ya venció.
-      // Se omite en la PRIMERA venta (renovar=false): el período inicial ya se
-      // otorgó al crear la empresa, así no se duplica la vigencia.
+      // Confirmar pago del mantenimiento (modelo fin de mes): salda TODAS las cuotas
+      // de mantenimiento vencidas → avanza "pagado hasta" (fecha_fin) al último fin
+      // de mes vencido. Se omite en la PRIMERA venta (renovar=false).
       if (opts.renovar !== false) {
-        const finActual = aMedianoche(s.fecha_fin);
-        const hoy = aMedianoche(new Date());
-        const base = finActual.getTime() >= hoy.getTime() ? finActual : hoy;
-        const nuevoFin = new Date(base);
-        nuevoFin.setMonth(nuevoFin.getMonth() + meses);
+        const vencidas = cuotasVencidas({
+          fechaInicio: s.fecha_inicio,
+          pagadoHasta: s.fecha_fin,
+          mantenimientoMensual: Number(s.mantenimiento_mensual) || 0,
+          hasta: new Date(),
+        });
+        if (!vencidas.length) {
+          throw new Error('AL_DIA: No hay mantenimiento vencido por pagar. El próximo se cobra a fin de mes.');
+        }
+        const ultimoFinMes = vencidas[vencidas.length - 1].fechaCorte; // 'YYYY-MM-DD'
         await conn.query(
           `UPDATE empresa_suscripcion SET fecha_fin = ? WHERE id = ?`,
-          [ymd(nuevoFin), s.id],
+          [ultimoFinMes, s.id],
         );
       }
 
@@ -534,6 +578,82 @@ export const planRepo = {
       }
     }
 
+    return planRepo.getEstadoById(empresaId);
+  },
+
+  /**
+   * Revierte la ÚLTIMA renovación del ciclo (si se confirmó el pago por error).
+   * Resta un ciclo (meses_vigencia) a fecha_fin, dejando el vencimiento como
+   * estaba antes de marcar. NO toca pagos (el botón "Confirmar pago" solo renueva,
+   * no registra pago). Vuelve a habilitar el botón de confirmar pago.
+   */
+  async revertirCiclo(empresaId: number): Promise<EstadoPlan> {
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      const [sus] = await conn.query<any[]>(
+        `SELECT s.id, s.fecha_inicio, s.fecha_fin FROM empresa_suscripcion s
+          WHERE s.empresa_id = ? AND s.estado_id = 1
+          ORDER BY s.id DESC LIMIT 1`,
+        [empresaId],
+      );
+      if (!(sus as any[]).length) throw new SinPlanError();
+      const s = (sus as any[])[0];
+      // Retrocede "pagado hasta" al fin del mes anterior (deshace un mes de mantenimiento).
+      const fin = aMedianoche(s.fecha_fin);
+      const nuevoFin = new Date(fin.getFullYear(), fin.getMonth(), 0);
+      // TOPE: no se puede retroceder más allá del inicio de la cuenta (no se debe
+      // mantenimiento de antes de la implementación). Piso = fin del mes ANTERIOR a fecha_inicio.
+      const inicio = aMedianoche(s.fecha_inicio);
+      const piso = new Date(inicio.getFullYear(), inicio.getMonth(), 0);
+      if (nuevoFin.getTime() < piso.getTime()) {
+        throw new Error('TOPE_REVERTIR: No se puede revertir más: ya está en el inicio de la cuenta (mes de implementación).');
+      }
+      await conn.query(`UPDATE empresa_suscripcion SET fecha_fin = ? WHERE id = ?`, [ymd(nuevoFin), s.id]);
+      await conn.commit();
+    } catch (e) { await conn.rollback(); throw e; } finally { conn.release(); }
+    return planRepo.getEstadoById(empresaId);
+  },
+
+  /**
+   * Ajuste MANUAL de "mantenimiento pagado hasta" (fecha_fin). Reemplaza al
+   * "revertir por clics": Vaxa fija exactamente hasta qué mes está pagado el
+   * mantenimiento. Se guarda como el ÚLTIMO DÍA del mes elegido (el modelo usa el
+   * mes, no el día). Sirve para corregir cualquier error sin adivinar.
+   */
+  async ajustarPagadoHasta(empresaId: number, fecha: string): Promise<EstadoPlan> {
+    const d = new Date(`${String(fecha).slice(0, 10)}T00:00:00`);
+    if (isNaN(d.getTime())) throw new Error('Fecha inválida');
+    const finMes = new Date(d.getFullYear(), d.getMonth() + 1, 0); // último día de ese mes
+    const [r] = await pool().query<any>(
+      `UPDATE empresa_suscripcion SET fecha_fin = ? WHERE empresa_id = ? AND estado_id = 1`,
+      [ymd(finMes), empresaId],
+    );
+    if (!r.affectedRows) throw new SinPlanError('SIN_PLAN: La empresa no tiene una suscripción activa.');
+    return planRepo.getEstadoById(empresaId);
+  },
+
+  /**
+   * Reactiva la cuenta de mantenimiento tras una suspensión por falta de pago
+   * (modelo Leonardo). Las cuotas ATRASADAS se cobran aparte (en "Nueva venta");
+   * este método arranca una CUENTA NUEVA desde hoy: fecha_inicio = hoy y
+   * "pagado hasta" = fin del mes anterior, de modo que el mes actual quede
+   * prorrateado desde hoy y se cobre a fin de este mes.
+   */
+  async reactivarCuenta(empresaId: number): Promise<EstadoPlan> {
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      const [r] = await conn.query<any>(
+        `UPDATE empresa_suscripcion
+            SET fecha_inicio = CURDATE(),
+                fecha_fin    = LAST_DAY(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))
+          WHERE empresa_id = ? AND estado_id = 1`,
+        [empresaId],
+      );
+      if (!r.affectedRows) throw new SinPlanError('SIN_PLAN: La empresa no tiene una suscripción activa para reactivar.');
+      await conn.commit();
+    } catch (e) { await conn.rollback(); throw e; } finally { conn.release(); }
     return planRepo.getEstadoById(empresaId);
   },
 
@@ -572,6 +692,161 @@ export const planRepo = {
       cpe_estado:        r.cpe_estado ?? null,
       detalle:           r.detalle ?? null,
     }));
+  },
+
+  /**
+   * Resumen de lo que hay que cobrarle a la empresa (modelo Leonardo, fin de mes):
+   * una cuota de mantenimiento por cada FIN DE MES vencido e impago (el mes de la
+   * implementación va prorrateado por días reales), + mantenimiento de usuarios
+   * adicionales de cada mes, + activación (pago único) de usuarios nuevos. Calculado
+   * al vuelo: reusa fecha_inicio (implementación), fecha_fin (mantenimiento pagado
+   * hasta), usuarios.created_at, parametros_facturacion y planes.
+   */
+  async resumenCobro(empresaId: number): Promise<ResumenCobro> {
+    await ensureActivacionCobrada();
+    const vacio: ResumenCobro = {
+      plan: null, ciclo: null, vencimiento: null,
+      usuarios: { incluidos: 0, actuales: 0, extra: 0, ilimitado: false },
+      lineas: [], total: 0, marcarActivacionUsuarios: [],
+      enCurso: [], totalEnCurso: 0, fechaCobroEnCurso: null,
+    };
+
+    const [ss] = await pool().query<any[]>(
+      `SELECT s.fecha_inicio, s.fecha_fin, ci.meses_pago, ci.meses_vigencia, ci.nombre AS ciclo,
+              p.id AS plan_id, p.nombre AS plan_nombre, p.slug AS plan_slug,
+              p.mantenimiento_mensual, p.usuarios_incluidos
+         FROM empresa_suscripcion s
+         JOIN ciclo_facturacion ci ON ci.id = s.ciclo_id
+         JOIN planes p             ON p.id  = s.plan_id
+        WHERE s.empresa_id = ? AND s.estado_id = 1
+        ORDER BY s.id DESC LIMIT 1`,
+      [empresaId],
+    );
+    if (!(ss as any[]).length) return vacio;
+    const s = (ss as any[])[0];
+    const mantMensual = Number(s.mantenimiento_mensual) || 0;
+    const cobranza    = estadoCobranzaMant({ fechaInicio: s.fecha_inicio, pagadoHasta: s.fecha_fin, mantenimientoMensual: mantMensual, hasta: new Date() });
+    const incluidos   = Number(s.usuarios_incluidos) || 0;
+    const ilimitadoUsuarios = incluidos === 0;   // convención: 0 = ilimitado (Corporativo)
+    const hoy = aMedianoche(new Date());
+
+    // Precios del usuario adicional (parametros_facturacion; defaults por si acaso).
+    const [prm] = await pool().query<any[]>(
+      `SELECT clave, valor FROM parametros_facturacion
+        WHERE clave IN ('usuario_extra_activacion','usuario_extra_mensual')`,
+    );
+    const P: Record<string, number> = {};
+    for (const r of prm as any[]) P[r.clave] = Number(r.valor);
+    const precioAct  = P['usuario_extra_activacion'] ?? 50;
+    const precioMant = P['usuario_extra_mensual'] ?? 5;
+
+    // Usuarios de certificaciones activos, del más antiguo al más nuevo.
+    let usuarios: any[] = [];
+    try {
+      const [us] = await pool().query<any[]>(
+        `SELECT u.id, u.nombres, u.apellidos, u.created_at, u.activacion_cobrada
+           FROM usuarios u
+           JOIN usuario_producto up ON up.usuario_id = u.id AND up.activo = 1
+           JOIN productos pr        ON pr.id = up.producto_id AND pr.slug = 'certificaciones'
+          WHERE u.empresa_id = ? AND u.activo = 1
+          ORDER BY u.created_at ASC, u.id ASC`,
+        [empresaId],
+      );
+      usuarios = us as any[];
+    } catch {
+      const [us] = await pool().query<any[]>(
+        `SELECT id, nombres, apellidos, created_at, activacion_cobrada
+           FROM usuarios WHERE empresa_id = ? AND activo = 1
+          ORDER BY created_at ASC, id ASC`,
+        [empresaId],
+      );
+      usuarios = us as any[];
+    }
+
+    // Los primeros `incluidos` van con el plan; el resto son adicionales.
+    const extras = ilimitadoUsuarios ? [] : usuarios.slice(incluidos);
+    const nombreDe = (u: any) => `${u.nombres ?? ''} ${u.apellidos ?? ''}`.trim() || `Usuario ${u.id}`;
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    const lineas: LineaCobro[] = [];
+
+    // ── MANTENIMIENTO a FIN DE MES (modelo Leonardo) ──────────────────────────
+    // Una cuota por cada fin de mes VENCIDO e impago; el mes de la implementación
+    // va prorrateado por los días reales del mes. Se incluye también el
+    // mantenimiento de los usuarios adicionales de ESE mes (prorrateado su 1er mes).
+    const todasCuotas = cuotasMantenimiento({
+      fechaInicio: s.fecha_inicio,
+      pagadoHasta: s.fecha_fin,
+      mantenimientoMensual: mantMensual,
+      hasta: hoy,
+    });
+    const cuotas   = todasCuotas.filter((c) => c.vencida);   // a cobrar (ya vencidas)
+    const enCursoC = todasCuotas.filter((c) => !c.vencida);  // mes en curso (aún no vence)
+
+    // Arma las líneas de mantenimiento (plan + usuarios adicionales) de una cuota.
+    const lineasDeCuota = (c: typeof todasCuotas[number]): LineaCobro[] => {
+      const out: LineaCobro[] = [{
+        concepto: 'mantenimiento',
+        descripcion: `Mantenimiento ${s.plan_nombre} · ${c.etiqueta}${c.prorrateado ? ` (prorrateado ${c.diasCobrados}/${c.diasMes} días)` : ''}`,
+        cantidad: 1,
+        precioUnitario: c.monto,
+        renueva: true,
+      }];
+      for (const u of extras) {
+        const m = mantenimientoUsuarioMes(u.created_at, c.anio, c.mes, precioMant);
+        if (m.monto > 0) {
+          out.push({
+            concepto: 'usuario_mant',
+            descripcion: `Mantenimiento usuario adicional · ${nombreDe(u)} · ${c.etiqueta}${m.prorrateado ? ` (prorr ${m.dias}/${m.diasMes})` : ''}`,
+            cantidad: 1,
+            precioUnitario: m.monto,
+            usuarioId: u.id,
+          });
+        }
+      }
+      return out;
+    };
+
+    for (const c of cuotas) lineas.push(...lineasDeCuota(c));
+
+    // Mes EN CURSO: informativo (no se cobra ni suma al total). Normalmente es 1 cuota
+    // (el mes actual); su fecha de cobro es el fin de ese mes.
+    const enCurso: LineaCobro[] = [];
+    for (const c of enCursoC) enCurso.push(...lineasDeCuota(c));
+    const totalEnCurso     = r2(enCurso.reduce((a, l) => a + l.cantidad * l.precioUnitario, 0));
+    const fechaCobroEnCurso = enCursoC.length ? enCursoC[enCursoC.length - 1].fechaCorte : null;
+
+    // NOTA: el "Resumen de cobro" es SOLO mantenimiento (automático, recurrente, a fin
+    // de mes). Los cobros por ADELANTADO (implementación, activación de usuario,
+    // recarga de créditos) son MANUALES → se arman en "Nueva venta" o en una Cotización
+    // cuando el cliente va a pagar. Por eso ya NO se inyecta la activación aquí.
+    void precioAct;  // ya no se cobra la activación en el resumen (es manual)
+    const marcarActivacionUsuarios: number[] = [];
+
+    const total = r2(lineas.reduce((a, l) => a + l.cantidad * l.precioUnitario, 0));
+
+    return {
+      plan: { id: s.plan_id, nombre: s.plan_nombre, slug: s.plan_slug },
+      ciclo: s.ciclo,
+      vencimiento: { fecha_fin: aYmd(s.fecha_fin)!, ...cobranza },
+      usuarios: { incluidos, actuales: usuarios.length, extra: extras.length, ilimitado: ilimitadoUsuarios },
+      lineas,
+      total,
+      marcarActivacionUsuarios,
+      enCurso,
+      totalEnCurso,
+      fechaCobroEnCurso,
+    };
+  },
+
+  /** Marca la activación (S/50 pago único) como ya cobrada para esos usuarios. */
+  async marcarActivacionCobrada(usuarioIds: number[]): Promise<void> {
+    await ensureActivacionCobrada();
+    const ids = (usuarioIds ?? []).filter((n) => Number.isInteger(n) && n > 0);
+    if (!ids.length) return;
+    await pool().query(
+      `UPDATE usuarios SET activacion_cobrada = 1 WHERE id IN (${ids.map(() => '?').join(',')})`,
+      ids,
+    );
   },
 };
 

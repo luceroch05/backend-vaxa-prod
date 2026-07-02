@@ -6,6 +6,10 @@ import { revokeOtherSessions } from '../../realtime/session-socket';
 import type { LoginDto, LoginResponse, JwtPayload } from './auth.types';
 import { JWT_SECRET, JWT_EXPIRES_IN } from '../../config/jwt.config';
 import { auditoriaRepo } from '../certificados/auditoria/auditoria.repository';
+import { estaVencidaPorPago, MSG_VENCIDA } from '../certificados/shared/db.helper';
+
+/** Tenant raíz de Vaxa: nunca se bloquea por vencimiento (es el panel interno). */
+const ROOT_TENANT = process.env.VAXA_ROOT_TENANT ?? 'vaxa';
 
 interface UsuarioRow {
   id: number;
@@ -50,6 +54,13 @@ export async function loginService(dto: LoginDto, ip?: string): Promise<LoginRes
   // a quien no tiene credenciales correctas.
   if (!usuario.empresa_activa) {
     throw new AuthError('Esta empresa está desactivada. Contacta con Vaxa para reactivarla.', 403);
+  }
+
+  // Bloqueo por falta de pago: si el plan de mantenimiento venció, NADIE de la
+  // empresa puede entrar al panel (salvo el tenant raíz de Vaxa). El corte entra
+  // el día siguiente a fecha_fin (ver estaVencidaPorPago).
+  if (usuario.tenant_slug !== ROOT_TENANT && await estaVencidaPorPago(usuario.empresa_id)) {
+    throw new AuthError(MSG_VENCIDA, 403);
   }
 
   // Multi-producto: el acceso se valida POR USUARIO y POR PRODUCTO. El mismo

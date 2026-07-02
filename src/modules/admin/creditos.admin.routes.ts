@@ -23,6 +23,15 @@ router.post('/empresas/:empresaId/recargar', w(async (req, res) => {
   res.json({ empresaId, saldo: nuevoSaldo });
 }));
 
+/** POST /api/admin/creditos/empresas/:empresaId/ajustar  { cantidad, descripcion }
+ *  cantidad con signo: negativa = quitar créditos (asignados de más por error). */
+router.post('/empresas/:empresaId/ajustar', w(async (req, res) => {
+  const empresaId = Number(req.params.empresaId);
+  const { cantidad, descripcion } = req.body ?? {};
+  const nuevoSaldo = await creditosRepo.ajustar(empresaId, Number(cantidad), uid(req), descripcion);
+  res.json({ empresaId, saldo: nuevoSaldo });
+}));
+
 /** GET /api/admin/creditos/empresas/:empresaId/movimientos */
 router.get('/empresas/:empresaId/movimientos', w(async (req, res) => {
   const empresaId = Number(req.params.empresaId);

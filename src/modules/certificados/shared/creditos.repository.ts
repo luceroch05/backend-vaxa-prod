@@ -130,4 +130,48 @@ export const creditosRepo = {
       conn.release();
     }
   },
+
+  /**
+   * Ajuste manual de créditos (acción de Vaxa). Acepta un delta con signo:
+   * negativo = QUITAR créditos (p. ej. se asignaron de más por error), positivo
+   * = corregir sumando. Mueve saldo y total asignado en la misma cantidad para
+   * no distorsionar el "consumido" (= asignado − disponible). No permite dejar
+   * el saldo en negativo: solo se puede quitar hasta lo que aún queda disponible
+   * (lo ya emitido no se puede recuperar). Registra un movimiento tipo 'ajuste'.
+   */
+  async ajustar(empresaId: number, delta: number, userId?: number, descripcion?: string) {
+    if (!Number.isInteger(delta) || delta === 0) throw new Error('El ajuste debe ser un entero distinto de cero');
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query<any[]>(
+        'SELECT creditos_disponibles, creditos_asignados_total FROM empresas WHERE id = ? FOR UPDATE',
+        [empresaId],
+      );
+      if (!(rows as any[]).length) throw new Error('Empresa no encontrada');
+      const saldo = (rows as any[])[0].creditos_disponibles ?? 0;
+      const asignados = (rows as any[])[0].creditos_asignados_total ?? 0;
+      const nuevoSaldo = saldo + delta;
+      if (nuevoSaldo < 0) {
+        throw new Error(`No puedes quitar ${Math.abs(delta)} créditos: la empresa solo tiene ${saldo} disponibles (el resto ya fue emitido).`);
+      }
+      const nuevoAsignado = Math.max(asignados + delta, 0);
+      await conn.query(
+        'UPDATE empresas SET creditos_disponibles = ?, creditos_asignados_total = ? WHERE id = ?',
+        [nuevoSaldo, nuevoAsignado, empresaId],
+      );
+      await conn.query(
+        `INSERT INTO creditos_movimientos (empresa_id, tipo, cantidad, saldo_resultante, descripcion, user_crea_id)
+         VALUES (?, 'ajuste', ?, ?, ?, ?)`,
+        [empresaId, delta, nuevoSaldo, descripcion ?? (delta < 0 ? 'Ajuste: se quitaron créditos' : 'Ajuste: se agregaron créditos'), userId ?? null],
+      );
+      await conn.commit();
+      return nuevoSaldo;
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+  },
 };

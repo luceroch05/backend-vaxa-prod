@@ -52,9 +52,29 @@ router.post('/empresas/:id/marcar-pagado', w(async (req, res) => {
   res.json(await planRepo.marcarPagado(Number(req.params.id), req.body ?? {}));
 }));
 
+/** Revierte la última renovación del ciclo (si se confirmó el pago por error). */
+router.post('/empresas/:id/revertir-ciclo', w(async (req, res) => {
+  res.json(await planRepo.revertirCiclo(Number(req.params.id)));
+}));
+
+/** Reactiva la cuenta de mantenimiento tras suspensión (cuenta nueva desde hoy). */
+router.post('/empresas/:id/reactivar-cuenta', w(async (req, res) => {
+  res.json(await planRepo.reactivarCuenta(Number(req.params.id)));
+}));
+
+/** Ajuste manual de "mantenimiento pagado hasta" (fecha_fin). body: { fecha } */
+router.post('/empresas/:id/pagado-hasta', w(async (req, res) => {
+  res.json(await planRepo.ajustarPagadoHasta(Number(req.params.id), String(req.body?.fecha ?? '')));
+}));
+
 /** Historial de pagos de una empresa. */
 router.get('/empresas/:id/pagos', w(async (req, res) => {
   res.json(await planRepo.listPagos(Number(req.params.id)));
+}));
+
+/** Resumen de lo que hay que cobrar (mantenimiento del ciclo + usuarios extra prorrateados). */
+router.get('/empresas/:id/resumen-cobro', w(async (req, res) => {
+  res.json(await planRepo.resumenCobro(Number(req.params.id)));
 }));
 
 /** ── Facturación electrónica ──────────────────────────────── */
@@ -86,6 +106,7 @@ router.post('/empresas/:id/venta', w(async (req, res) => {
       ? { tipo: b.descuento.tipo === 'pct' ? 'pct' : 'monto', valor: Number(b.descuento.valor) }
       : undefined,
     tipoComprobante: b.tipo_comprobante,
+    marcarActivacionUsuarios: Array.isArray(b.marcar_activacion_usuarios) ? b.marcar_activacion_usuarios.map(Number) : undefined,
   }));
 }));
 

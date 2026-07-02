@@ -70,6 +70,32 @@ export interface Cobranza {
   estado_cobranza: EstadoCobranza; // vigente | por_vencer | vencido
 }
 
+/** Una línea sugerida del "resumen de lo que debo cobrar". */
+export interface LineaCobro {
+  concepto: 'mantenimiento' | 'usuario_mant' | 'usuario_activacion' | 'usuario_mant_prorrateado';
+  descripcion: string;
+  cantidad: number;
+  precioUnitario: number;
+  renueva?: boolean;     // el mantenimiento del plan renueva la suscripción al cobrarse
+  usuarioId?: number;    // usuario adicional al que corresponde (activación/prorrateo)
+}
+
+/** Resumen de lo que se le debe cobrar a la empresa (calculado, no se almacena). */
+export interface ResumenCobro {
+  plan: { id: number; nombre: string; slug: string } | null;
+  ciclo: string | null;
+  vencimiento: (Cobranza & { fecha_fin: string }) | null;
+  usuarios: { incluidos: number; actuales: number; extra: number; ilimitado: boolean };
+  lineas: LineaCobro[];
+  total: number;
+  marcarActivacionUsuarios: number[];  // ids a marcar activacion_cobrada=1 al registrar la venta
+  // Mes EN CURSO (aún no vencido): informativo, NO se cobra todavía ni suma al total.
+  // Sirve para que el mantenimiento del mes actual "se vea" sin presionar al cliente.
+  enCurso: LineaCobro[];
+  totalEnCurso: number;
+  fechaCobroEnCurso: string | null;    // fin de mes en que se cobrará ('YYYY-MM-DD'), o null
+}
+
 /** Estado del plan de una empresa: suscripción vigente + consumo del mes. */
 /** Saldo de créditos de la empresa (modelo créditos + mantenimiento). */
 export interface CreditosSaldo {

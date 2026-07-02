@@ -11,6 +11,7 @@ import { tenantMiddleware } from './middleware/tenant.middleware';
 import { jwtMiddleware } from './middleware/jwt.middleware';
 import { rateLimit } from './middleware/rate-limit.middleware';
 import { tenantMatchMiddleware } from './middleware/tenant-match.middleware';
+import { bloqueoVencimientoMiddleware } from './middleware/bloqueo-vencimiento.middleware';
 import { requireRootTenant } from './middleware/require-root-tenant.middleware';
 import { creditosAdminRoutes } from './modules/admin/creditos.admin.routes';
 import { adminRoutes } from './modules/admin/admin.routes';
@@ -113,7 +114,7 @@ app.get(`${BASE_PATH}/public/certificado/:tenantSlug/:codigo`, publicLimiter,
 );
 
 /** Certificados: JWT + verificación de que el tenant del token == x-tenant-id */
-app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, certificadosRoutes);
+app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, certificadosRoutes);
 
 /** Administración Vaxa: JWT + solo tenant raíz (créditos, empresas y usuarios de todas las empresas) */
 app.use(`${BASE_PATH}/api/admin/creditos`,      jwtMiddleware, requireRootTenant, creditosAdminRoutes);

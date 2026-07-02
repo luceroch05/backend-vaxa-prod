@@ -2,15 +2,29 @@ import type { Request, Response } from 'express';
 import { emisionService } from './emision.service';
 import { tid } from '../shared/router.helper';
 import { SinCreditosError } from '../shared/creditos.repository';
+import { getEmpresaId, estaVencidaPorPago, MSG_VENCIDA } from '../shared/db.helper';
 
 /** Id del usuario autenticado (lo pone jwtMiddleware en authUser.sub). */
 const uid = (req: Request): number | undefined => (req as any).authUser?.sub;
+
+/** Corta la acción si el plan de la empresa venció (falta de pago). true = ya respondió 403. */
+async function bloquearSiVencida(req: Request, res: Response): Promise<boolean> {
+  try {
+    const empresaId = await getEmpresaId(tid(req));
+    if (await estaVencidaPorPago(empresaId)) {
+      res.status(403).json({ error: MSG_VENCIDA, code: 'PLAN_VENCIDO' });
+      return true;
+    }
+  } catch { /* no se pudo resolver la empresa → no bloquea aquí */ }
+  return false;
+}
 
 export async function listCertificados(req: Request, res: Response): Promise<void> {
   res.json(await emisionService.listAll(tid(req)));
 }
 
 export async function generarCertificado(req: Request, res: Response): Promise<void> {
+  if (await bloquearSiVencida(req, res)) return;
   try {
     res.status(201).json(await emisionService.generar(tid(req), Number(req.params.inscripcionId), uid(req)));
   } catch (e) {
@@ -26,6 +40,7 @@ export async function generarCertificado(req: Request, res: Response): Promise<v
 export async function generarLote(req: Request, res: Response): Promise<void> {
   const ids: number[] = Array.isArray(req.body?.ids) ? req.body.ids.map(Number).filter(Boolean) : [];
   if (ids.length === 0) { res.status(400).json({ error: 'ids (lista no vacía) es requerido' }); return; }
+  if (await bloquearSiVencida(req, res)) return;
   try {
     res.json(await emisionService.generarLote(tid(req), ids, uid(req)));
   } catch (e) {
@@ -40,6 +55,12 @@ export async function generarLote(req: Request, res: Response): Promise<void> {
 export async function validarPublico(req: Request, res: Response): Promise<void> {
   const tenantSlug = req.params.tenantSlug;
   if (!tenantSlug) { res.status(400).json({ error: 'Empresa requerida' }); return; }
+  // Bloqueo por falta de pago: si el plan de la institución venció, se corta también
+  // la validación pública (regla de negocio: sin pago no funciona nada).
+  try {
+    const empresaId = await getEmpresaId(tenantSlug);
+    if (await estaVencidaPorPago(empresaId)) { res.status(403).json({ error: MSG_VENCIDA }); return; }
+  } catch { /* empresa no encontrada → sigue al 404 normal abajo */ }
   const cert = await emisionService.validarPublico(req.params.codigo, tenantSlug);
   if (!cert) { res.status(404).json({ error: 'Certificado no encontrado' }); return; }
   res.json(cert);

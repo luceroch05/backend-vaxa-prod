@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { getPool } from '../../../db/pool';
-import { pool, getEmpresaId } from '../shared/db.helper';
+import { pool, getEmpresaId, estaVencidaPorPago, MSG_VENCIDA } from '../shared/db.helper';
 import { catalogosRepo } from '../shared/certificados.repository';
 import { rateLimit } from '../../../middleware/rate-limit.middleware';
 
@@ -143,6 +143,12 @@ router.post('/:tenantSlug/registro', async (req: Request, res: Response) => {
 
   try {
     const empresaId = await getEmpresaId(req.params.tenantSlug);
+
+    // Bloqueo por falta de pago: si el plan venció, no se aceptan nuevas inscripciones.
+    if (await estaVencidaPorPago(empresaId)) {
+      res.status(403).json({ error: MSG_VENCIDA });
+      return;
+    }
 
     // Verificar que el grupo pertenece a esta empresa y está activo
     const [grupoRows] = await db.execute<any[]>(
