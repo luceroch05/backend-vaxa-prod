@@ -59,6 +59,10 @@ export interface CuotaMantenimiento {
  * Devuelve las cuotas de mantenimiento desde el primer mes impago hasta el mes de
  * `hasta` (normalmente hoy), inclusive. La cuota del mes de `hasta` va marcada
  * como NO vencida si su fin de mes aún no llegó (se está acumulando).
+ *
+ * NOTA: este es el motor MENSUAL (ciclo mensual, cobro a fin de mes). Los ciclos
+ * PREPAGO (semestral/anual "paga N, recibe M") NO usan esta función: se cobran por
+ * ciclo completo por adelantado con `cobranzaPrepago` / `cobroPrepagoPendiente`.
  */
 export function cuotasMantenimiento(opts: {
   fechaInicio: string | Date;
@@ -138,6 +142,134 @@ export function estadoCobranzaMant(opts: Parameters<typeof cuotasMantenimiento>[
     estado_cobranza,
     cuotas_vencidas: n,
   };
+}
+
+/** Estado del semáforo de cobranza (común a mensual y prepago). */
+export interface CobranzaEstado {
+  fecha_limite_pago: string;
+  dias_para_vencer: number;
+  estado_cobranza: 'vigente' | 'por_vencer' | 'vencido';
+  cuotas_vencidas: number;
+}
+
+/** Último día del mes que está `n` meses después del mes de `d`. */
+function finDeMesMas(d: Date, n: number): Date {
+  return aMedianoche(new Date(d.getFullYear(), d.getMonth() + n + 1, 0));
+}
+
+/**
+ * "Pagado hasta" efectivo (fin de mes): si nunca pagó (null o < inicio), la cobertura
+ * termina el fin del mes ANTERIOR al de la implementación → todo el 1er ciclo queda
+ * pendiente por adelantado.
+ */
+function coberturaHasta(fechaInicio: string | Date, pagadoHasta: string | Date | null): Date {
+  const inicio = aMedianoche(fechaInicio);
+  const piso = new Date(inicio.getFullYear(), inicio.getMonth(), 0); // fin del mes anterior al inicio
+  if (!pagadoHasta) return aMedianoche(piso);
+  const p = aMedianoche(pagadoHasta);
+  return p.getTime() < piso.getTime() ? aMedianoche(piso) : p;
+}
+
+/**
+ * Meses de PRÓRROGA "agua/luz" para prepago: tras vencer la cobertura, la empresa
+ * tiene este margen de gracia (sigue funcionando, solo aviso). Si no paga al pasar
+ * ese mes, recién ahí se suspende. Igual criterio que el mensual (corte a la 2da).
+ */
+const MESES_PRORROGA_PREPAGO = 1;
+
+/**
+ * Días ANTES de que se acabe la cobertura en que ya se avisa/cobra la renovación:
+ * el resumen muestra el cobro y el cliente ve el aviso desde 1 semana antes.
+ */
+const AVISO_DIAS_PREPAGO = 7;
+
+/**
+ * Semáforo de cobranza para ciclos PREPAGO (semestral/anual): la empresa paga el
+ * ciclo por adelantado y `fecha_fin` = "cubierto hasta" (fin de mes). Estados:
+ *  - vigente:    aún falta más de 1 semana para que se acabe la cobertura.
+ *  - por_vencer: desde 1 semana antes de acabarse la cobertura y durante la prórroga
+ *                (1 mes de gracia tras vencer) → se avisa/cobra, sigue funcionando.
+ *  - vencido:    pasó la prórroga sin pagar → suspendido (corte).
+ * `fecha_limite_pago` = fin de la cobertura vigente (cuándo toca renovar).
+ */
+export function cobranzaPrepago(opts: {
+  fechaInicio: string | Date;
+  pagadoHasta: string | Date | null;
+  hasta: string | Date;
+  mesesVigencia: number;
+}): CobranzaEstado {
+  const hoy = aMedianoche(opts.hasta);
+  const cobertura = coberturaHasta(opts.fechaInicio, opts.pagadoHasta);
+  // Aviso: se abre la ventana 1 semana antes de que se acabe la cobertura.
+  const avisaDesde = cobertura.getTime() - AVISO_DIAS_PREPAGO * DIA_MS;
+  // Prórroga: 1 mes de gracia tras vencer la cobertura (no un ciclo completo).
+  const suspendeEn = finDeMesMas(cobertura, MESES_PRORROGA_PREPAGO);
+  let estado_cobranza: CobranzaEstado['estado_cobranza'];
+  let cuotas_vencidas: number;
+  if (hoy.getTime() < avisaDesde) { estado_cobranza = 'vigente';    cuotas_vencidas = 0; }
+  else if (hoy.getTime() <= suspendeEn.getTime()) { estado_cobranza = 'por_vencer'; cuotas_vencidas = 1; }
+  else { estado_cobranza = 'vencido'; cuotas_vencidas = 2; }
+  return {
+    fecha_limite_pago: ymd(cobertura),
+    dias_para_vencer: Math.round((cobertura.getTime() - hoy.getTime()) / DIA_MS),
+    estado_cobranza,
+    cuotas_vencidas,
+  };
+}
+
+/** La próxima renovación PREPAGO de una empresa (un ciclo). Siempre existe; `cobrableAhora`
+ *  indica si ya se puede cobrar (ventana de 7 días antes / vencido) o es solo preview. */
+export interface CobroPrepago {
+  mesesPago: number;
+  mesesVigencia: number;
+  montoPlan: number;        // meses_pago × mantenimiento mensual
+  etiquetaVentana: string;  // "julio–diciembre 2026"
+  nuevaCobertura: string;   // 'YYYY-MM-DD' fin de mes hasta donde cubre al pagar
+  cobrableAhora: boolean;   // true = ya se puede cobrar; false = preview (aún cubierto, opacado)
+  fechaCorte: string;       // 'YYYY-MM-DD' fin de la cobertura actual (cuándo se cobra la renovación)
+}
+export function proximaRenovacionPrepago(opts: {
+  fechaInicio: string | Date;
+  pagadoHasta: string | Date | null;
+  mantenimientoMensual: number;
+  hasta: string | Date;
+  mesesPago: number;
+  mesesVigencia: number;
+}): CobroPrepago {
+  const hoy = aMedianoche(opts.hasta);
+  const mp = Math.max(1, Number(opts.mesesPago) || 1);
+  const mv = Math.max(mp, Number(opts.mesesVigencia) || mp);
+  const mant = Number(opts.mantenimientoMensual) || 0;
+  const cobertura = coberturaHasta(opts.fechaInicio, opts.pagadoHasta);
+  // Cobrable desde 1 semana antes de que se acabe la cobertura (y después de vencida).
+  const avisaDesde = cobertura.getTime() - AVISO_DIAS_PREPAGO * DIA_MS;
+  const cobrableAhora = hoy.getTime() >= avisaDesde;
+  const nuevaCobertura = finDeMesMas(cobertura, mv);
+  const mesIni = new Date(cobertura.getFullYear(), cobertura.getMonth() + 1, 1); // 1er mes de la ventana
+  const etiquetaVentana = mesIni.getFullYear() === nuevaCobertura.getFullYear()
+    ? `${MESES[mesIni.getMonth()]}–${MESES[nuevaCobertura.getMonth()]} ${nuevaCobertura.getFullYear()}`
+    : `${MESES[mesIni.getMonth()]} ${mesIni.getFullYear()}–${MESES[nuevaCobertura.getMonth()]} ${nuevaCobertura.getFullYear()}`;
+  return { mesesPago: mp, mesesVigencia: mv, montoPlan: r2(mant * mp), etiquetaVentana, nuevaCobertura: ymd(nuevaCobertura), cobrableAhora, fechaCorte: ymd(cobertura) };
+}
+/** El cobro PREPAGO ya cobrable (o null si todavía es solo preview). Lo usan pago/venta. */
+export function cobroPrepagoPendiente(opts: Parameters<typeof proximaRenovacionPrepago>[0]): CobroPrepago | null {
+  const p = proximaRenovacionPrepago(opts);
+  return p.cobrableAhora ? p : null;
+}
+
+/**
+ * Semáforo de cobranza unificado: mensual (motor fin-de-mes) o prepago (por ciclo),
+ * según `mesesVigencia` (1 = mensual; >1 = prepago semestral/anual).
+ */
+export function estadoCobranza(opts: {
+  fechaInicio: string | Date;
+  pagadoHasta: string | Date | null;
+  mantenimientoMensual: number;
+  hasta: string | Date;
+  mesesVigencia?: number;
+}): CobranzaEstado {
+  const mv = Math.max(1, Number(opts.mesesVigencia) || 1);
+  return mv > 1 ? cobranzaPrepago(opts as any) : estadoCobranzaMant(opts);
 }
 
 /**

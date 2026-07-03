@@ -92,8 +92,12 @@ function imagenABuffer(src: string | null | undefined): ImagenBuffer | null {
     } catch { return null; }
   }
 
-  // Soporte para rutas relativas
-  const abs = path.join(process.cwd(), 'public', src);
+  // Soporte para rutas de archivo: las imágenes subidas viven en cwd/uploads
+  // (servidas por express.static); rutas legadas en cwd/public.
+  const limpio = src.replace(/^\/+/, '');
+  const abs = limpio.startsWith('uploads/')
+    ? path.join(process.cwd(), limpio)              // cwd/uploads/<sub>/<archivo>
+    : path.join(process.cwd(), 'public', limpio);   // legado
   if (!fs.existsSync(abs)) return null;
   const ext = path.extname(abs).toLowerCase().slice(1);
   const mimeMap: Record<string, string> = {

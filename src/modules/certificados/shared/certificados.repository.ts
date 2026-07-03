@@ -5,6 +5,7 @@ import { pool, getEmpresaId } from './db.helper';
 import { planRepo } from '../planes/plan.repository';
 import { auditoriaRepo, describirCambios } from '../auditoria/auditoria.repository';
 import { aTituloNombre } from '../../../shared/text';
+import { guardarImagen } from '../../../shared/imagenes';
 import { pdfService, type PdfDatos } from '../pdf/pdf.service';
 
 import { TipoDocumentoEntity, TipoProgramaEntity, ModalidadEntity } from '../catalogos/catalogo.entity';
@@ -1200,7 +1201,7 @@ export const logosRepo = {
     const empresaId = await getEmpresaId(tenantSlug);
     const [result] = await pool().query<any>(
       'INSERT INTO logos (empresa_id, nombre, imagen_logo, user_crea_id) VALUES (?, ?, ?, ?)',
-      [empresaId, dto.nombre ?? null, dto.imagen_logo, userId ?? null],
+      [empresaId, dto.nombre ?? null, guardarImagen(dto.imagen_logo, 'logos'), userId ?? null],
     );
     const [rows] = await pool().query<any[]>('SELECT * FROM logos WHERE id = ?', [result.insertId]);
     const logo = LogoEntity.fromRow(rows[0]);
@@ -1247,7 +1248,7 @@ export const firmasRepo = {
     const empresaId = await getEmpresaId(tenantSlug);
     const [result] = await pool().query<any>(
       'INSERT INTO firmas (empresa_id, nombre_autoridad, cargo, imagen_firma, user_crea_id) VALUES (?, ?, ?, ?, ?)',
-      [empresaId, dto.nombre_autoridad, dto.cargo, dto.imagen_firma, userId ?? null],
+      [empresaId, dto.nombre_autoridad, dto.cargo, guardarImagen(dto.imagen_firma, 'firmas'), userId ?? null],
     );
     const [rows] = await pool().query<any[]>('SELECT * FROM firmas WHERE id = ?', [result.insertId]);
     const firma = FirmaEntity.fromRow(rows[0]);
@@ -1341,7 +1342,7 @@ export const configRepo = {
          plantilla_url       = VALUES(plantilla_url),
          texto_personalizado = VALUES(texto_personalizado),
          user_actua_id       = ?`,
-      [empresaId, programaId, grupoId, dto.plantilla_url ?? null, dto.texto_personalizado ?? null, userId ?? null, userId ?? null],
+      [empresaId, programaId, grupoId, guardarImagen(dto.plantilla_url, 'plantillas') ?? null, dto.texto_personalizado ?? null, userId ?? null, userId ?? null],
     );
 
     const [rows] = await pool().query<any[]>(

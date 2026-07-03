@@ -31,6 +31,11 @@ router.delete('/empresas/:id', w(async (req, res) => {
   res.json(await adminRepo.eliminarEmpresa(Number(req.params.id)));
 }));
 
+/** Migración ÚNICA: pasa las imágenes base64 de la BD a archivos en /uploads (para correr desde el panel). */
+router.post('/migrar-imagenes', w(async (_req, res) => {
+  res.json(await adminRepo.migrarImagenes());
+}));
+
 /** Recarga manual de créditos. body: { cantidad, monto? } — monto opcional para paquetes con descuento. */
 router.post('/empresas/:id/recargar-cupo', w(async (req, res) => {
   const { cantidad, monto } = req.body ?? {};

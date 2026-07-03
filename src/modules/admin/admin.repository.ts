@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import { getPool } from '../../db/pool';
 import { planRepo } from '../certificados/planes/plan.repository';
+import { guardarImagen } from '../../shared/imagenes';
 
 function pool() {
   const p = getPool();
@@ -86,7 +87,7 @@ export const adminRepo = {
     if (dto.dominio !== undefined) { fields.push('dominio = ?'); values.push(dto.dominio.trim() || null); }
     if (dto.ruc !== undefined)     { fields.push('ruc = ?');     values.push(dto.ruc.trim() || null); }
     if (dto.tipo_doc !== undefined){ fields.push('tipo_doc = ?'); values.push(dto.tipo_doc || '6'); }
-    if (dto.logo !== undefined)    { fields.push('logo_url = ?'); values.push(dto.logo || null); }
+    if (dto.logo !== undefined)    { fields.push('logo_url = ?'); values.push(guardarImagen(dto.logo, 'empresas') || null); }
     if (dto.activo !== undefined)  { fields.push('activo = ?');  values.push(dto.activo ? 1 : 0); }
 
     if (fields.length) {
@@ -185,7 +186,7 @@ export const adminRepo = {
 
     const [res] = await pool().query<any>(
       `INSERT INTO empresas (razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo) VALUES (?, ?, ?, ?, ?, ?, 1)`,
-      [razon, slug, dto.dominio?.trim() || null, dto.ruc?.trim() || null, dto.tipo_doc || '6', dto.logo || null],
+      [razon, slug, dto.dominio?.trim() || null, dto.ruc?.trim() || null, dto.tipo_doc || '6', guardarImagen(dto.logo, 'empresas') || null],
     );
     const empresaId = res.insertId as number;
 
@@ -425,5 +426,43 @@ export const adminRepo = {
   async listRoles() {
     const [rows] = await pool().query<any[]>('SELECT id, nombre, descripcion FROM roles ORDER BY id');
     return rows;
+  },
+
+  /**
+   * Migra las imágenes guardadas como base64 en la BD a ARCHIVOS en /uploads y deja
+   * en la columna solo la ruta. Idempotente (salta las que ya son ruta). Pensado para
+   * correr desde un botón del panel (cPanel no tiene terminal). No toca certificados emitidos.
+   */
+  async migrarImagenes() {
+    const OBJETIVOS: Array<{ tabla: string; col: string; sub: string; pk: string }> = [
+      { tabla: 'empresas',                    col: 'logo_url',      sub: 'empresas',   pk: 'id' },
+      { tabla: 'logos',                       col: 'imagen_logo',   sub: 'logos',      pk: 'id' },
+      { tabla: 'firmas',                      col: 'imagen_firma',  sub: 'firmas',     pk: 'id' },
+      { tabla: 'configuraciones_certificado', col: 'plantilla_url', sub: 'plantillas', pk: 'id' },
+    ];
+    const resultado: Array<{ tabla: string; migradas: number; total: number }> = [];
+    let totalMigradas = 0;
+    for (const t of OBJETIVOS) {
+      let rows: any[];
+      try {
+        [rows] = await pool().query<any[]>(
+          `SELECT ${t.pk} AS pk, ${t.col} AS img FROM ${t.tabla} WHERE ${t.col} LIKE 'data:image%'`,
+        );
+      } catch {
+        resultado.push({ tabla: t.tabla, migradas: 0, total: 0 });  // tabla/columna no existe → se salta
+        continue;
+      }
+      let migr = 0;
+      for (const r of rows) {
+        const ruta = guardarImagen(r.img, t.sub);
+        if (ruta && ruta !== r.img) {
+          await pool().query(`UPDATE ${t.tabla} SET ${t.col} = ? WHERE ${t.pk} = ?`, [ruta, r.pk]);
+          migr++;
+        }
+      }
+      totalMigradas += migr;
+      resultado.push({ tabla: t.tabla, migradas: migr, total: rows.length });
+    }
+    return { totalMigradas, detalle: resultado };
   },
 };

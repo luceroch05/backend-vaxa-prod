@@ -1,5 +1,5 @@
 import { getPool } from '../../../db/pool';
-import { cuotasVencidas } from '../planes/mantenimiento.helper';
+import { estadoCobranza } from '../planes/mantenimiento.helper';
 
 export function pool() {
   const p = getPool();
@@ -30,23 +30,27 @@ export async function getEmpresaId(tenantSlug: string): Promise<number> {
  */
 export async function estaVencidaPorPago(empresaId: number): Promise<boolean> {
   const [rows] = await pool().query<any[]>(
-    `SELECT s.fecha_inicio, s.fecha_fin, p.mantenimiento_mensual
+    `SELECT s.fecha_inicio, s.fecha_fin, p.mantenimiento_mensual,
+            ci.meses_pago, ci.meses_vigencia
        FROM empresa_suscripcion s
-       JOIN planes p ON p.id = s.plan_id
+       JOIN planes p             ON p.id  = s.plan_id
+       JOIN ciclo_facturacion ci ON ci.id = s.ciclo_id
       WHERE s.empresa_id = ? AND s.estado_id = 1
       ORDER BY s.id DESC LIMIT 1`,
     [empresaId],
   );
   if (!rows.length) return false;
   const s = rows[0];
-  // Corte "agua/luz": 2 o más cuotas de mantenimiento de fin de mes vencidas e impagas.
-  const vencidas = cuotasVencidas({
+  // Corte "agua/luz": estado 'vencido' del semáforo (mensual: 2 cuotas fin-de-mes
+  // impagas; prepago semestral/anual: cobertura vencida hace más de un ciclo completo).
+  const cob = estadoCobranza({
     fechaInicio: s.fecha_inicio,
     pagadoHasta: s.fecha_fin,
     mantenimientoMensual: Number(s.mantenimiento_mensual) || 0,
     hasta: new Date(),
+    mesesVigencia: Number(s.meses_vigencia) || 1,
   });
-  return vencidas.length >= 2;
+  return cob.estado_cobranza === 'vencido';
 }
 
 /** Mensaje único del bloqueo por falta de pago (para reusar en todos los puntos). */

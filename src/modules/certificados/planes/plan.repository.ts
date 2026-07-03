@@ -1,7 +1,7 @@
 import type { PoolConnection } from 'mysql2/promise';
 import { pool, getEmpresaId } from '../shared/db.helper';
 import { Plan, PlanEntity, EstadoPlan, ConsumoMes, Cobranza, CreditosSaldo, ResumenCobro, LineaCobro } from './plan.entity';
-import { cuotasMantenimiento, cuotasVencidas, mantenimientoUsuarioMes, estadoCobranzaMant } from './mantenimiento.helper';
+import { cuotasMantenimiento, cuotasVencidas, mantenimientoUsuarioMes, estadoCobranzaMant, estadoCobranza, cobroPrepagoPendiente, proximaRenovacionPrepago } from './mantenimiento.helper';
 import { comprobanteRepo } from '../../facturacion/comprobante.repository';
 import { getSunatConfig } from '../../facturacion/sunat/sunat.config';
 import { SinCreditosError } from '../shared/creditos.repository';
@@ -220,7 +220,7 @@ export const planRepo = {
 
     const [sus] = await pool().query<any[]>(
       `SELECT s.id AS suscripcion_id, s.fecha_inicio, s.fecha_fin,
-              c.nombre AS ciclo, es.nombre AS estado, p.*
+              c.nombre AS ciclo, c.meses_pago, c.meses_vigencia, es.nombre AS estado, p.*
          FROM empresa_suscripcion s
          JOIN planes p              ON p.id  = s.plan_id
          JOIN ciclo_facturacion c   ON c.id  = s.ciclo_id
@@ -284,11 +284,12 @@ export const planRepo = {
             estado:       sus[0].estado,
             fecha_inicio: aYmd(sus[0].fecha_inicio)!,
             fecha_fin:    aYmd(sus[0].fecha_fin)!,
-            ...estadoCobranzaMant({
+            ...estadoCobranza({
               fechaInicio: sus[0].fecha_inicio,
               pagadoHasta: sus[0].fecha_fin,
               mantenimientoMensual: Number(plan?.mantenimiento_mensual) || 0,
               hasta: new Date(),
+              mesesVigencia: Number(sus[0].meses_vigencia) || 1,
             }),
           }
         : null,
@@ -440,7 +441,7 @@ export const planRepo = {
     const [rows] = await pool().query<any[]>(
       `SELECT e.id AS empresa_id, e.razon_social, e.tenant_slug, e.activo,
               s.id AS suscripcion_id, s.fecha_inicio, s.fecha_fin,
-              c.nombre AS ciclo, p.nombre AS plan, p.precio_mensual, p.mantenimiento_mensual,
+              c.nombre AS ciclo, c.meses_pago, c.meses_vigencia, p.nombre AS plan, p.precio_mensual, p.mantenimiento_mensual,
               (SELECT MAX(pg.fecha_pago) FROM pagos pg
                  WHERE pg.empresa_id = e.id AND pg.concepto_id = 1 AND pg.estado_id = 2) AS ultimo_pago
          FROM empresas e
@@ -466,11 +467,12 @@ export const planRepo = {
         fecha_fin:    aYmd(r.fecha_fin),
         ultimo_pago:  aYmd(r.ultimo_pago),
         cobranza:     r.fecha_fin
-          ? estadoCobranzaMant({
+          ? estadoCobranza({
               fechaInicio: r.fecha_inicio,
               pagadoHasta: r.fecha_fin,
               mantenimientoMensual: Number(r.mantenimiento_mensual) || 0,
               hasta: new Date(),
+              mesesVigencia: Number(r.meses_vigencia) || 1,
             })
           : null,
       }))
@@ -499,7 +501,7 @@ export const planRepo = {
       // Suscripción activa más reciente (aunque ya haya vencido por fecha).
       const [sus] = await conn.query<any[]>(
         `SELECT s.id, s.fecha_inicio, s.fecha_fin, s.precio_pactado,
-                ci.meses_pago, p.precio_mensual, p.mantenimiento_mensual, p.nombre AS plan_nombre
+                ci.meses_pago, ci.meses_vigencia, p.precio_mensual, p.mantenimiento_mensual, p.nombre AS plan_nombre
            FROM empresa_suscripcion s
            JOIN ciclo_facturacion ci ON ci.id = s.ciclo_id
            JOIN planes p             ON p.id  = s.plan_id
@@ -539,20 +541,42 @@ export const planRepo = {
       // de mantenimiento vencidas → avanza "pagado hasta" (fecha_fin) al último fin
       // de mes vencido. Se omite en la PRIMERA venta (renovar=false).
       if (opts.renovar !== false) {
-        const vencidas = cuotasVencidas({
-          fechaInicio: s.fecha_inicio,
-          pagadoHasta: s.fecha_fin,
-          mantenimientoMensual: Number(s.mantenimiento_mensual) || 0,
-          hasta: new Date(),
-        });
-        if (!vencidas.length) {
-          throw new Error('AL_DIA: No hay mantenimiento vencido por pagar. El próximo se cobra a fin de mes.');
+        const mesesVigencia = Number(s.meses_vigencia) || 1;
+        if (mesesVigencia > 1) {
+          // PREPAGO (semestral/anual): renovar salda el ciclo completo → "cubierto hasta"
+          // salta meses_vigencia meses hacia adelante.
+          const pend = cobroPrepagoPendiente({
+            fechaInicio: s.fecha_inicio,
+            pagadoHasta: s.fecha_fin,
+            mantenimientoMensual: Number(s.mantenimiento_mensual) || 0,
+            hasta: new Date(),
+            mesesPago: Number(s.meses_pago) || 1,
+            mesesVigencia,
+          });
+          if (!pend) {
+            throw new Error('AL_DIA: El mantenimiento del ciclo ya está cubierto. El próximo se cobra al vencer la cobertura.');
+          }
+          await conn.query(
+            `UPDATE empresa_suscripcion SET fecha_fin = ? WHERE id = ?`,
+            [pend.nuevaCobertura, s.id],
+          );
+        } else {
+          // MENSUAL: salda TODAS las cuotas de fin de mes vencidas → avanza "pagado hasta".
+          const vencidas = cuotasVencidas({
+            fechaInicio: s.fecha_inicio,
+            pagadoHasta: s.fecha_fin,
+            mantenimientoMensual: Number(s.mantenimiento_mensual) || 0,
+            hasta: new Date(),
+          });
+          if (!vencidas.length) {
+            throw new Error('AL_DIA: No hay mantenimiento vencido por pagar. El próximo se cobra a fin de mes.');
+          }
+          const ultimoFinMes = vencidas[vencidas.length - 1].fechaCorte; // 'YYYY-MM-DD'
+          await conn.query(
+            `UPDATE empresa_suscripcion SET fecha_fin = ? WHERE id = ?`,
+            [ultimoFinMes, s.id],
+          );
         }
-        const ultimoFinMes = vencidas[vencidas.length - 1].fechaCorte; // 'YYYY-MM-DD'
-        await conn.query(
-          `UPDATE empresa_suscripcion SET fecha_fin = ? WHERE id = ?`,
-          [ultimoFinMes, s.id],
-        );
       }
 
       await conn.commit();
@@ -725,7 +749,10 @@ export const planRepo = {
     if (!(ss as any[]).length) return vacio;
     const s = (ss as any[])[0];
     const mantMensual = Number(s.mantenimiento_mensual) || 0;
-    const cobranza    = estadoCobranzaMant({ fechaInicio: s.fecha_inicio, pagadoHasta: s.fecha_fin, mantenimientoMensual: mantMensual, hasta: new Date() });
+    const mesesPago     = Number(s.meses_pago) || 1;
+    const mesesVigencia = Number(s.meses_vigencia) || 1;
+    const esPrepago   = mesesVigencia > 1;   // semestral/anual: cobro por ciclo adelantado
+    const cobranza    = estadoCobranza({ fechaInicio: s.fecha_inicio, pagadoHasta: s.fecha_fin, mantenimientoMensual: mantMensual, hasta: new Date(), mesesVigencia });
     const incluidos   = Number(s.usuarios_incluidos) || 0;
     const ilimitadoUsuarios = incluidos === 0;   // convención: 0 = ilimitado (Corporativo)
     const hoy = aMedianoche(new Date());
@@ -768,52 +795,95 @@ export const planRepo = {
     const nombreDe = (u: any) => `${u.nombres ?? ''} ${u.apellidos ?? ''}`.trim() || `Usuario ${u.id}`;
     const r2 = (n: number) => Math.round(n * 100) / 100;
     const lineas: LineaCobro[] = [];
+    let enCurso: LineaCobro[] = [];
+    let totalEnCurso = 0;
+    let fechaCobroEnCurso: string | null = null;
 
-    // ── MANTENIMIENTO a FIN DE MES (modelo Leonardo) ──────────────────────────
-    // Una cuota por cada fin de mes VENCIDO e impago; el mes de la implementación
-    // va prorrateado por los días reales del mes. Se incluye también el
-    // mantenimiento de los usuarios adicionales de ESE mes (prorrateado su 1er mes).
-    const todasCuotas = cuotasMantenimiento({
-      fechaInicio: s.fecha_inicio,
-      pagadoHasta: s.fecha_fin,
-      mantenimientoMensual: mantMensual,
-      hasta: hoy,
-    });
-    const cuotas   = todasCuotas.filter((c) => c.vencida);   // a cobrar (ya vencidas)
-    const enCursoC = todasCuotas.filter((c) => !c.vencida);  // mes en curso (aún no vence)
-
-    // Arma las líneas de mantenimiento (plan + usuarios adicionales) de una cuota.
-    const lineasDeCuota = (c: typeof todasCuotas[number]): LineaCobro[] => {
-      const out: LineaCobro[] = [{
+    if (esPrepago) {
+      // ── PREPAGO (semestral/anual): se cobra el CICLO COMPLETO por adelantado ──────
+      // "paga N, recibe M": un solo cobro de N meses que cubre M meses. Mientras la
+      // cobertura (fecha_fin) siga vigente, NO hay nada que cobrar. Al vencer, se cobra
+      // el siguiente ciclo (y "pagado hasta" salta M meses al confirmar el pago/venta).
+      const prox = proximaRenovacionPrepago({
+        fechaInicio: s.fecha_inicio,
+        pagadoHasta: s.fecha_fin,
+        mantenimientoMensual: mantMensual,
+        hasta: hoy,
+        mesesPago,
+        mesesVigencia,
+      });
+      // Líneas de la renovación (plan + usuarios adicionales del ciclo).
+      const lineasRenovacion: LineaCobro[] = [{
         concepto: 'mantenimiento',
-        descripcion: `Mantenimiento ${s.plan_nombre} · ${c.etiqueta}${c.prorrateado ? ` (prorrateado ${c.diasCobrados}/${c.diasMes} días)` : ''}`,
+        descripcion: `Mantenimiento ${s.plan_nombre} · ${s.ciclo} · ${prox.etiquetaVentana} (paga ${prox.mesesPago}, recibe ${prox.mesesVigencia})`,
         cantidad: 1,
-        precioUnitario: c.monto,
+        precioUnitario: prox.montoPlan,
         renueva: true,
       }];
       for (const u of extras) {
-        const m = mantenimientoUsuarioMes(u.created_at, c.anio, c.mes, precioMant);
-        if (m.monto > 0) {
-          out.push({
-            concepto: 'usuario_mant',
-            descripcion: `Mantenimiento usuario adicional · ${nombreDe(u)} · ${c.etiqueta}${m.prorrateado ? ` (prorr ${m.dias}/${m.diasMes})` : ''}`,
-            cantidad: 1,
-            precioUnitario: m.monto,
-            usuarioId: u.id,
-          });
-        }
+        lineasRenovacion.push({
+          concepto: 'usuario_mant',
+          descripcion: `Mantenimiento usuario adicional · ${nombreDe(u)} · ${prox.etiquetaVentana} (paga ${prox.mesesPago})`,
+          cantidad: 1,
+          precioUnitario: r2(precioMant * prox.mesesPago),
+          usuarioId: u.id,
+        });
       }
-      return out;
-    };
+      if (prox.cobrableAhora) {
+        // Dentro de la ventana (7 días antes / vencido): ACTIVO, se puede cobrar ya.
+        lineas.push(...lineasRenovacion);
+      } else {
+        // Aún cubierto: preview OPACADO en "en curso" (no se cobra todavía).
+        enCurso = lineasRenovacion;
+        totalEnCurso = r2(enCurso.reduce((a, l) => a + l.cantidad * l.precioUnitario, 0));
+        fechaCobroEnCurso = prox.fechaCorte;
+      }
+    } else {
+      // ── MENSUAL (modelo Leonardo, fin de mes) ─────────────────────────────────────
+      // Una cuota por cada fin de mes VENCIDO e impago; el mes de la implementación
+      // va prorrateado por los días reales del mes. Se incluye también el
+      // mantenimiento de los usuarios adicionales de ESE mes (prorrateado su 1er mes).
+      const todasCuotas = cuotasMantenimiento({
+        fechaInicio: s.fecha_inicio,
+        pagadoHasta: s.fecha_fin,
+        mantenimientoMensual: mantMensual,
+        hasta: hoy,
+      });
+      const cuotas   = todasCuotas.filter((c) => c.vencida);   // a cobrar (ya vencidas)
+      const enCursoC = todasCuotas.filter((c) => !c.vencida);  // mes en curso (aún no vence)
 
-    for (const c of cuotas) lineas.push(...lineasDeCuota(c));
+      // Arma las líneas de mantenimiento (plan + usuarios adicionales) de una cuota.
+      const lineasDeCuota = (c: typeof todasCuotas[number]): LineaCobro[] => {
+        const out: LineaCobro[] = [{
+          concepto: 'mantenimiento',
+          descripcion: `Mantenimiento ${s.plan_nombre} · ${c.etiqueta}${c.prorrateado ? ` (prorrateado ${c.diasCobrados}/${c.diasMes} días)` : ''}`,
+          cantidad: 1,
+          precioUnitario: c.monto,
+          renueva: true,
+        }];
+        for (const u of extras) {
+          const m = mantenimientoUsuarioMes(u.created_at, c.anio, c.mes, precioMant);
+          if (m.monto > 0) {
+            out.push({
+              concepto: 'usuario_mant',
+              descripcion: `Mantenimiento usuario adicional · ${nombreDe(u)} · ${c.etiqueta}${m.prorrateado ? ` (prorr ${m.dias}/${m.diasMes})` : ''}`,
+              cantidad: 1,
+              precioUnitario: m.monto,
+              usuarioId: u.id,
+            });
+          }
+        }
+        return out;
+      };
 
-    // Mes EN CURSO: informativo (no se cobra ni suma al total). Normalmente es 1 cuota
-    // (el mes actual); su fecha de cobro es el fin de ese mes.
-    const enCurso: LineaCobro[] = [];
-    for (const c of enCursoC) enCurso.push(...lineasDeCuota(c));
-    const totalEnCurso     = r2(enCurso.reduce((a, l) => a + l.cantidad * l.precioUnitario, 0));
-    const fechaCobroEnCurso = enCursoC.length ? enCursoC[enCursoC.length - 1].fechaCorte : null;
+      for (const c of cuotas) lineas.push(...lineasDeCuota(c));
+
+      // Mes EN CURSO: informativo (no se cobra ni suma al total). Normalmente es 1 cuota
+      // (el mes actual); su fecha de cobro es el fin de ese mes.
+      for (const c of enCursoC) enCurso.push(...lineasDeCuota(c));
+      totalEnCurso     = r2(enCurso.reduce((a, l) => a + l.cantidad * l.precioUnitario, 0));
+      fechaCobroEnCurso = enCursoC.length ? enCursoC[enCursoC.length - 1].fechaCorte : null;
+    }
 
     // NOTA: el "Resumen de cobro" es SOLO mantenimiento (automático, recurrente, a fin
     // de mes). Los cobros por ADELANTADO (implementación, activación de usuario,

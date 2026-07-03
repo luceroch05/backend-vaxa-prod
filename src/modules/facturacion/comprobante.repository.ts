@@ -4,7 +4,7 @@
  * guardar veredicto + CDR) y las consultas para la UI de sistemas-vaxa.
  */
 import { pool } from '../certificados/shared/db.helper';
-import { cuotasVencidas } from '../certificados/planes/mantenimiento.helper';
+import { cuotasVencidas, cobroPrepagoPendiente } from '../certificados/planes/mantenimiento.helper';
 import { construirFacturaXml, calcularTotales } from './ubl/factura.builder';
 import { construirNotaXml, TipoNota } from './ubl/nota.builder';
 import { construirResumenXml } from './ubl/resumen.builder';
@@ -356,9 +356,11 @@ export const comprobanteRepo = {
     const [rows] = await pool().query<any[]>(
       `SELECT pg.id, pg.empresa_id, pg.monto, pg.comprobante_id,
               cp.codigo AS concepto_codigo, cp.nombre AS concepto,
-              p.nombre AS plan_nombre, ci.nombre AS ciclo
+              p.nombre AS plan_nombre, ci.nombre AS ciclo,
+              e.tipo_doc AS empresa_tipo_doc
          FROM pagos pg
          JOIN concepto_pago cp ON cp.id = pg.concepto_id
+         LEFT JOIN empresas e             ON e.id  = pg.empresa_id
          LEFT JOIN empresa_suscripcion s  ON s.id  = pg.suscripcion_id
          LEFT JOIN planes p               ON p.id  = s.plan_id
          LEFT JOIN ciclo_facturacion ci   ON ci.id = s.ciclo_id
@@ -370,10 +372,14 @@ export const comprobanteRepo = {
     if (pago.comprobante_id) throw new Error('Este pago ya tiene un comprobante emitido.');
     if (!pago.empresa_id) throw new Error('El pago no está asociado a una empresa.');
 
+    // Regla SUNAT: FACTURA (01) solo para RUC; PERSONA (DNI/CE/pasaporte) → BOLETA (03).
+    // Nunca se emite factura a un DNI (SUNAT la rechaza / multa).
+    const tipoComprobante: TipoComprobante = (pago.empresa_tipo_doc || '6') === '6' ? '01' : '03';
     const valorUnitario = Math.round((Number(pago.monto) / (1 + igvPct / 100)) * 100) / 100;
     return comprobanteRepo.emitir({
       empresaId: pago.empresa_id,
       pagoId: pago.id,
+      tipoComprobante,
       items: [{ descripcion: descripcionPago(pago), cantidad: 1, valorUnitario, unidad: 'ZZ' }],
     });
   },
@@ -392,9 +398,11 @@ export const comprobanteRepo = {
 
     // Suscripción vigente (para vincular el pago y avanzar el mantenimiento). Tolerante.
     const [ss] = await pool().query<any[]>(
-      `SELECT s.id AS suscripcion_id, s.fecha_inicio, s.fecha_fin, p.mantenimiento_mensual
+      `SELECT s.id AS suscripcion_id, s.fecha_inicio, s.fecha_fin, p.mantenimiento_mensual,
+              ci.meses_pago, ci.meses_vigencia
          FROM empresa_suscripcion s
-         JOIN planes p ON p.id = s.plan_id
+         JOIN planes p             ON p.id  = s.plan_id
+         JOIN ciclo_facturacion ci ON ci.id = s.ciclo_id
         WHERE s.empresa_id = ? AND s.estado_id = 1
         ORDER BY s.id DESC LIMIT 1`,
       [input.empresaId],
@@ -460,20 +468,39 @@ export const comprobanteRepo = {
       );
     }
 
-    // ── Mantenimiento pagado → avanzar "pagado hasta" al último fin de mes vencido ──
-    // (modelo Leonardo: el mantenimiento se salda por cuotas de fin de mes).
+    // ── Mantenimiento pagado → avanzar "pagado hasta" (fecha_fin) ──
     if (renueva && suscripcionId) {
-      const vencidas = cuotasVencidas({
-        fechaInicio: ss[0].fecha_inicio,
-        pagadoHasta: ss[0].fecha_fin,
-        mantenimientoMensual: Number(ss[0].mantenimiento_mensual) || 0,
-        hasta: new Date(),
-      });
-      if (vencidas.length) {
-        await pool().query(
-          `UPDATE empresa_suscripcion SET fecha_fin = ? WHERE id = ?`,
-          [vencidas[vencidas.length - 1].fechaCorte, suscripcionId],
-        );
+      const mesesVigencia = Number(ss[0].meses_vigencia) || 1;
+      if (mesesVigencia > 1) {
+        // PREPAGO (semestral/anual): la venta salda el ciclo → "cubierto hasta" salta M meses.
+        const pend = cobroPrepagoPendiente({
+          fechaInicio: ss[0].fecha_inicio,
+          pagadoHasta: ss[0].fecha_fin,
+          mantenimientoMensual: Number(ss[0].mantenimiento_mensual) || 0,
+          hasta: new Date(),
+          mesesPago: Number(ss[0].meses_pago) || 1,
+          mesesVigencia,
+        });
+        if (pend) {
+          await pool().query(
+            `UPDATE empresa_suscripcion SET fecha_fin = ? WHERE id = ?`,
+            [pend.nuevaCobertura, suscripcionId],
+          );
+        }
+      } else {
+        // MENSUAL (fin de mes): salda hasta la última cuota de fin de mes vencida.
+        const vencidas = cuotasVencidas({
+          fechaInicio: ss[0].fecha_inicio,
+          pagadoHasta: ss[0].fecha_fin,
+          mantenimientoMensual: Number(ss[0].mantenimiento_mensual) || 0,
+          hasta: new Date(),
+        });
+        if (vencidas.length) {
+          await pool().query(
+            `UPDATE empresa_suscripcion SET fecha_fin = ? WHERE id = ?`,
+            [vencidas[vencidas.length - 1].fechaCorte, suscripcionId],
+          );
+        }
       }
     }
 
