@@ -6,6 +6,7 @@
 import PDFDocument from 'pdfkit';
 import { getSunatConfig, type EmisorConfig } from '../facturacion/sunat/sunat.config';
 import type { CotizacionConDetalle } from './cotizacion.entity';
+import { logoVaxa, LOGO_RATIO } from '../../shared/marca';
 
 const sol = (n: number) => `S/ ${Number(n).toFixed(2)}`;
 
@@ -36,20 +37,25 @@ export async function generarCotizacionPdf(c: CotizacionConDetalle): Promise<Buf
   const DARK = '#0D0E12';
   const GREY = '#6B7280';
 
-  // ── Encabezado: emisor (izq) + recuadro de cotización (der) ──
-  doc.fillColor(DARK).fontSize(16).font('Helvetica-Bold').text(em.razonSocial, 40, 45, { width: 300 });
+  // ── Encabezado: logo Vaxa + emisor (izq) + recuadro de cotización (der) ──
+  const logo = await logoVaxa();
+  if (logo) {
+    const lw = 150;
+    doc.image(logo, 40, 42, { width: lw, height: lw / LOGO_RATIO });
+  }
+  doc.fillColor(DARK).fontSize(15).font('Helvetica-Bold').text(em.razonSocial, 40, 108, { width: 300 });
   doc.fillColor(GREY).fontSize(9).font('Helvetica')
-    .text(`RUC: ${em.ruc}`, 40, 70)
-    .text(em.direccion, 40, 83, { width: 300 })
-    .text(`${em.distrito} - ${em.provincia} - ${em.departamento}`, 40, 96, { width: 300 });
+    .text(`RUC: ${em.ruc}`, 40, 130)
+    .text(em.direccion, 40, 142, { width: 300 })
+    .text(`${em.distrito} - ${em.provincia} - ${em.departamento}`, 40, 154, { width: 300 });
 
-  doc.roundedRect(360, 45, 195, 70, 8).lineWidth(1.5).stroke(GOLD);
+  doc.roundedRect(360, 45, 195, 72, 8).lineWidth(1).fillAndStroke('#F4F5F7', '#E5E7EB');
   doc.fillColor(DARK).fontSize(12).font('Helvetica-Bold')
-    .text('COTIZACIÓN', 360, 58, { width: 195, align: 'center' });
-  doc.fillColor(GOLD).fontSize(14).text(c.numero, 360, 82, { width: 195, align: 'center' });
+    .text('COTIZACIÓN', 360, 60, { width: 195, align: 'center' });
+  doc.fillColor(GOLD).fontSize(14).text(c.numero, 360, 84, { width: 195, align: 'center' });
 
   // ── Cliente + validez ──
-  let y = 140;
+  let y = 176;
   doc.fillColor(DARK).fontSize(9.5).font('Helvetica-Bold').text('CLIENTE', 40, y);
   doc.font('Helvetica').fillColor(GREY)
     .text(c.cliente_razon_social, 40, y + 14, { width: 300 })
@@ -62,7 +68,7 @@ export async function generarCotizacionPdf(c: CotizacionConDetalle): Promise<Buf
   doc.font('Helvetica').fillColor(GREY).text(fmtFecha(c.valida_hasta), 400, y + 46);
 
   // ── Tabla de ítems ──
-  y = 210;
+  y = 250;
   doc.rect(40, y, 515, 20).fill(DARK);
   doc.fillColor('#fff').fontSize(8.5).font('Helvetica-Bold')
     .text('CANT.', 48, y + 6)
