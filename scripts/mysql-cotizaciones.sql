@@ -92,7 +92,10 @@ CREATE TABLE IF NOT EXISTS cotizacion_detalle (
   descripcion     VARCHAR(250)  NOT NULL,
   cantidad        DECIMAL(12,2) NOT NULL DEFAULT 1,
   precio_unitario DECIMAL(12,2) NOT NULL DEFAULT 0,    -- con IGV (lo que se ve)
-  total           DECIMAL(12,2) NOT NULL DEFAULT 0,    -- cantidad * precio_unitario
+  descuento_tipo  VARCHAR(5)   NULL,                   -- 'monto' | 'pct' (descuento propio de la línea)
+  descuento_valor DECIMAL(12,2) NOT NULL DEFAULT 0,    -- valor ingresado (% o soles)
+  descuento_monto DECIMAL(12,2) NOT NULL DEFAULT 0,    -- descuento en soles resultante para la línea
+  total           DECIMAL(12,2) NOT NULL DEFAULT 0,    -- cantidad * precio_unitario - descuento_monto (neto)
   creditos        INT NULL,                            -- créditos que otorgaría esta línea (paquete)
   renueva         TINYINT(1) NOT NULL DEFAULT 0,       -- si renovaría la suscripción (mantenimiento)
   FOREIGN KEY (cotizacion_id) REFERENCES cotizaciones(id) ON DELETE CASCADE

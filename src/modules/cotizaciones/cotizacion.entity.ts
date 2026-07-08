@@ -4,7 +4,10 @@ export interface CotizacionDetalle {
   descripcion: string;
   cantidad: number;
   precio_unitario: number;   // CON IGV (lo que se ve/escribe)
-  total: number;             // cantidad * precio_unitario
+  descuento_tipo: 'monto' | 'pct' | null; // descuento propio de la línea
+  descuento_valor: number;   // valor ingresado (% o soles)
+  descuento_monto: number;   // descuento en soles resultante para la línea
+  total: number;             // cantidad * precio_unitario - descuento_monto (neto)
   creditos: number | null;   // créditos que otorgaría esta línea (paquete)
   renueva: boolean;          // si renovaría la suscripción (mantenimiento)
 }
@@ -46,7 +49,7 @@ export interface CotizacionConDetalle extends Cotizacion {
 export interface NuevaCotizacionInput {
   empresaId?: number | null;
   cliente?: { tipoDoc: string; numDoc: string; razonSocial: string; email?: string };
-  items: Array<{ descripcion: string; cantidad: number; precioUnitario: number; creditos?: number; renueva?: boolean }>;
+  items: Array<{ descripcion: string; cantidad: number; precioUnitario: number; creditos?: number; renueva?: boolean; descuentoTipo?: 'monto' | 'pct'; descuentoValor?: number }>;
   descuento?: { tipo: 'monto' | 'pct'; valor: number };
   igvIncluido?: boolean;
   notas?: string;

@@ -27,6 +27,8 @@ export interface VentaItem {
   precioUnitario: number;       // CON IGV (lo que se ve y se escribe)
   creditos?: number;            // total de créditos que otorga esta línea (paquete)
   renueva?: boolean;            // si renueva la suscripción (mantenimiento)
+  descuentoTipo?: 'monto' | 'pct'; // descuento propio de ESTA línea (independiente del global)
+  descuentoValor?: number;         // %: sobre el importe de la línea · monto: soles sobre el importe
 }
 
 export interface VentaInput {
@@ -85,6 +87,25 @@ async function correlativoResumenDelDia(fecha: string): Promise<number> {
 }
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Precio unitario NETO de una línea tras aplicar SU PROPIO descuento (mismos
+ * "soles" que precioUnitario, es decir CON IGV). El descuento por línea se
+ * "hornea" en el precio unitario antes de la proration del descuento global,
+ * así el XML de SUNAT no cambia y el IGV cuadra.
+ *   · pct   → precio * (1 - pct/100)
+ *   · monto → se descuenta del importe de la línea (cantidad * precio)
+ */
+function precioUnitarioNetoLinea(it: VentaItem): number {
+  const precio = r2(Number(it.precioUnitario) || 0);
+  const cant = Math.max(1, Number(it.cantidad) || 1);
+  const v = Number(it.descuentoValor) || 0;
+  if (v <= 0) return precio;
+  if (it.descuentoTipo === 'pct') return r2(precio * (1 - Math.min(v, 100) / 100));
+  const importe = r2(cant * precio);
+  const neto = Math.max(0, importe - Math.min(v, importe));
+  return r2(neto / cant);
+}
 
 /** Arma la descripción de la línea de la factura según el concepto del pago + plan. */
 function descripcionPago(p: { concepto_codigo?: string; concepto?: string; plan_nombre?: string | null; ciclo?: string | null }): string {
@@ -409,11 +430,12 @@ export const comprobanteRepo = {
     );
     const suscripcionId = ss[0]?.suscripcion_id ?? null;
 
-    // ── Líneas libres → ItemComprobante (precio CON IGV → valor SIN IGV) ──
+    // ── Líneas libres → ItemComprobante (precio CON IGV, ya neto del descuento
+    //    de la propia línea, → valor SIN IGV) ──
     const items: ItemComprobante[] = input.items.map((it) => ({
       descripcion: String(it.descripcion ?? 'Producto').slice(0, 250),
       cantidad: Math.max(1, Number(it.cantidad) || 1),
-      valorUnitario: r2(Number(it.precioUnitario) / f),
+      valorUnitario: r2(precioUnitarioNetoLinea(it) / f),
       unidad: 'ZZ',
     }));
 
@@ -536,7 +558,7 @@ export const comprobanteRepo = {
     const items: ItemComprobante[] = input.items.map((it) => ({
       descripcion: String(it.descripcion ?? 'Producto').slice(0, 250),
       cantidad: Math.max(1, Number(it.cantidad) || 1),
-      valorUnitario: r2(Number(it.precioUnitario) / f),
+      valorUnitario: r2(precioUnitarioNetoLinea(it) / f),
       unidad: 'ZZ',
     }));
 

@@ -78,12 +78,19 @@ export async function generarCotizacionPdf(c: CotizacionConDetalle): Promise<Buf
   y += 20;
   doc.font('Helvetica').fontSize(9).fillColor(DARK);
   for (const d of c.detalle ?? []) {
-    const h = Math.max(16, Math.ceil(String(d.descripcion).length / 60) * 12);
+    const tieneDesc = Number(d.descuento_monto) > 0;
+    const h = Math.max(16, Math.ceil(String(d.descripcion).length / 60) * 12) + (tieneDesc ? 11 : 0);
     doc.fillColor(DARK)
       .text(String(d.cantidad), 48, y + 4, { width: 40 })
       .text(String(d.descripcion), 95, y + 4, { width: 295 })
       .text(sol(d.precio_unitario), 400, y + 4, { width: 60, align: 'right' })
       .text(sol(d.total), 480, y + 4, { width: 67, align: 'right' });
+    if (tieneDesc) {
+      const etq = d.descuento_tipo === 'pct' ? `Descuento ${Number(d.descuento_valor)}%` : 'Descuento';
+      doc.font('Helvetica').fontSize(7.5).fillColor(GOLD)
+        .text(`${etq}: - ${sol(d.descuento_monto)}`, 95, y + 15, { width: 295 });
+      doc.fontSize(9).fillColor(DARK);
+    }
     y += h;
     doc.moveTo(40, y).lineTo(555, y).lineWidth(0.5).strokeColor('#E5E7EB').stroke();
   }

@@ -34,12 +34,26 @@ async function siguienteNumero(conn: PoolConnection): Promise<string> {
   return `COT-${anio}-${String(corr).padStart(4, '0')}`;
 }
 
-/** Calcula subtotal, descuento y total (todo con IGV = lo que se ve). */
+/** Descuento propio de una línea (independiente del global). Devuelve el bruto,
+ *  el descuento en soles y el neto de la línea (todo con IGV = lo que se ve). */
+function descuentoLinea(it: NuevaCotizacionInput['items'][number]) {
+  const cantidad = Math.max(1, Number(it.cantidad) || 1);
+  const precio = r2(Number(it.precioUnitario) || 0);
+  const bruto = r2(cantidad * precio);
+  const valor = Number(it.descuentoValor) || 0;
+  const tipo: 'monto' | 'pct' | null = valor > 0 ? (it.descuentoTipo === 'pct' ? 'pct' : 'monto') : null;
+  const monto = valor > 0
+    ? (tipo === 'pct' ? r2(bruto * Math.min(valor, 100) / 100) : r2(Math.min(valor, bruto)))
+    : 0;
+  return { cantidad, precio, bruto, tipo, valor: valor > 0 ? valor : 0, monto, neto: r2(bruto - monto) };
+}
+
+/** Calcula subtotal (neto de descuentos por línea), descuento global y total. */
 function calcularTotales(
   items: NuevaCotizacionInput['items'],
   descuento?: { tipo: 'monto' | 'pct'; valor: number },
 ) {
-  const subtotal = r2(items.reduce((a, it) => a + (Number(it.cantidad) || 0) * (Number(it.precioUnitario) || 0), 0));
+  const subtotal = r2(items.reduce((a, it) => a + descuentoLinea(it).neto, 0));
   let descuentoMonto = 0;
   if (descuento && descuento.valor > 0) {
     descuentoMonto = descuento.tipo === 'pct'
@@ -50,33 +64,56 @@ function calcularTotales(
   return { subtotal, descuentoMonto, total };
 }
 
+/** Resuelve el cliente (snapshot) desde empresa registrada o prospecto. */
+async function resolverCliente(input: NuevaCotizacionInput) {
+  const empresaId: number | null = input.empresaId ?? null;
+  let tipoDoc = '6', numDoc = '0', razonSocial = '', email: string | null = null;
+  if (empresaId) {
+    const [rows] = await pool().query<any[]>(
+      'SELECT razon_social, ruc, tipo_doc FROM empresas WHERE id = ? LIMIT 1', [empresaId],
+    );
+    if (!rows.length) throw new Error('La empresa seleccionada no existe.');
+    razonSocial = rows[0].razon_social;
+    numDoc      = rows[0].ruc ?? '0';
+    tipoDoc     = rows[0].tipo_doc ?? '6';
+  } else if (input.cliente) {
+    razonSocial = String(input.cliente.razonSocial ?? '').trim();
+    tipoDoc     = input.cliente.tipoDoc || '1';
+    numDoc      = tipoDoc === '0' ? '0' : String(input.cliente.numDoc ?? '').trim();
+    email       = input.cliente.email?.trim() || null;
+    if (!razonSocial) throw new Error('Falta el nombre del cliente.');
+    if (tipoDoc !== '0' && !numDoc) throw new Error('Falta el documento del cliente.');
+  } else {
+    throw new Error('Falta el cliente: elige una empresa o ingresa un prospecto.');
+  }
+  return { empresaId, tipoDoc, numDoc, razonSocial, email };
+}
+
+/** Inserta las líneas de una cotización (usa la conexión de la transacción). */
+async function insertarDetalle(conn: PoolConnection, cotizacionId: number, items: NuevaCotizacionInput['items']) {
+  let orden = 1;
+  for (const it of items) {
+    const d = descuentoLinea(it);
+    await conn.query(
+      `INSERT INTO cotizacion_detalle
+         (cotizacion_id, orden, descripcion, cantidad, precio_unitario,
+          descuento_tipo, descuento_valor, descuento_monto, total, creditos, renueva)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        cotizacionId, orden++, String(it.descripcion ?? 'Producto').slice(0, 250),
+        d.cantidad, d.precio, d.tipo, d.valor, d.monto, d.neto,
+        it.creditos ? Math.max(0, Number(it.creditos)) : null, it.renueva ? 1 : 0,
+      ],
+    );
+  }
+}
+
 export const cotizacionRepo = {
   /** Crea una cotización (empresa registrada o prospecto) con sus líneas. */
   async crear(input: NuevaCotizacionInput): Promise<CotizacionConDetalle> {
     if (!input.items?.length) throw new Error('La cotización no tiene líneas. Agrega al menos un producto.');
 
-    // ── Resolver el cliente (snapshot) ──
-    let empresaId: number | null = input.empresaId ?? null;
-    let tipoDoc = '6', numDoc = '0', razonSocial = '', email: string | null = null;
-
-    if (empresaId) {
-      const [rows] = await pool().query<any[]>(
-        'SELECT razon_social, ruc, tipo_doc FROM empresas WHERE id = ? LIMIT 1', [empresaId],
-      );
-      if (!rows.length) throw new Error('La empresa seleccionada no existe.');
-      razonSocial = rows[0].razon_social;
-      numDoc      = rows[0].ruc ?? '0';
-      tipoDoc     = rows[0].tipo_doc ?? '6';
-    } else if (input.cliente) {
-      razonSocial = String(input.cliente.razonSocial ?? '').trim();
-      tipoDoc     = input.cliente.tipoDoc || '1';
-      numDoc      = tipoDoc === '0' ? '0' : String(input.cliente.numDoc ?? '').trim();
-      email       = input.cliente.email?.trim() || null;
-      if (!razonSocial) throw new Error('Falta el nombre del cliente.');
-      if (tipoDoc !== '0' && !numDoc) throw new Error('Falta el documento del cliente.');
-    } else {
-      throw new Error('Falta el cliente: elige una empresa o ingresa un prospecto.');
-    }
+    const { empresaId, tipoDoc, numDoc, razonSocial, email } = await resolverCliente(input);
 
     const igvIncluido = input.igvIncluido !== false;
     const descuento = input.descuento && Number(input.descuento.valor) > 0
@@ -104,21 +141,7 @@ export const cotizacionRepo = {
       );
       cotizacionId = ins.insertId;
 
-      let orden = 1;
-      for (const it of input.items) {
-        const cantidad = Math.max(1, Number(it.cantidad) || 1);
-        const precio = r2(Number(it.precioUnitario) || 0);
-        await conn.query(
-          `INSERT INTO cotizacion_detalle
-             (cotizacion_id, orden, descripcion, cantidad, precio_unitario, total, creditos, renueva)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            cotizacionId, orden++, String(it.descripcion ?? 'Producto').slice(0, 250),
-            cantidad, precio, r2(cantidad * precio),
-            it.creditos ? Math.max(0, Number(it.creditos)) : null, it.renueva ? 1 : 0,
-          ],
-        );
-      }
+      await insertarDetalle(conn, cotizacionId, input.items);
 
       await conn.commit();
     } catch (e) {
@@ -147,7 +170,8 @@ export const cotizacionRepo = {
     const [rows] = await pool().query<any[]>(`${SELECT_BASE} WHERE c.id = ? LIMIT 1`, [id]);
     if (!rows.length) return null;
     const [det] = await pool().query<any[]>(
-      `SELECT orden, descripcion, cantidad, precio_unitario, total, creditos, renueva
+      `SELECT orden, descripcion, cantidad, precio_unitario,
+              descuento_tipo, descuento_valor, descuento_monto, total, creditos, renueva
          FROM cotizacion_detalle WHERE cotizacion_id = ? ORDER BY orden`,
       [id],
     );
@@ -155,7 +179,11 @@ export const cotizacionRepo = {
       ...CotizacionEntity.fromRow(rows[0]),
       detalle: det.map((d) => ({
         orden: d.orden, descripcion: d.descripcion,
-        cantidad: Number(d.cantidad), precio_unitario: Number(d.precio_unitario), total: Number(d.total),
+        cantidad: Number(d.cantidad), precio_unitario: Number(d.precio_unitario),
+        descuento_tipo: d.descuento_tipo ?? null,
+        descuento_valor: Number(d.descuento_valor ?? 0),
+        descuento_monto: Number(d.descuento_monto ?? 0),
+        total: Number(d.total),
         creditos: d.creditos != null ? Number(d.creditos) : null, renueva: !!d.renueva,
       })),
     };
@@ -169,6 +197,73 @@ export const cotizacionRepo = {
     const cot = await this.getById(id);
     if (!cot) throw new Error('Cotización no encontrada.');
     return cot;
+  },
+
+  /**
+   * Edita una cotización (cliente, líneas, descuento, notas, validez). Recalcula
+   * totales. NO se puede editar si ya fue convertida en venta (tiene comprobante).
+   * Conserva número y estado; reemplaza el detalle por completo.
+   */
+  async actualizar(id: number, input: NuevaCotizacionInput): Promise<CotizacionConDetalle> {
+    if (!input.items?.length) throw new Error('La cotización no tiene líneas. Agrega al menos un producto.');
+    const actual = await this.getById(id);
+    if (!actual) throw new Error('Cotización no encontrada.');
+    if (actual.comprobante_id) throw new Error('No se puede editar una cotización ya convertida en venta.');
+
+    const { empresaId, tipoDoc, numDoc, razonSocial, email } = await resolverCliente(input);
+    const igvIncluido = input.igvIncluido !== false;
+    const descuento = input.descuento && Number(input.descuento.valor) > 0
+      ? { tipo: input.descuento.tipo === 'pct' ? 'pct' as const : 'monto' as const, valor: Number(input.descuento.valor) }
+      : undefined;
+    const { subtotal, descuentoMonto, total } = calcularTotales(input.items, descuento);
+
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query(
+        `UPDATE cotizaciones SET
+           empresa_id = ?, cliente_tipo_doc = ?, cliente_num_doc = ?, cliente_razon_social = ?, cliente_email = ?,
+           igv_incluido = ?, subtotal = ?, descuento_tipo = ?, descuento_valor = ?, descuento_monto = ?, total = ?,
+           notas = ?, valida_hasta = ?
+         WHERE id = ?`,
+        [
+          empresaId, tipoDoc, numDoc, razonSocial.slice(0, 190), email,
+          igvIncluido ? 1 : 0, subtotal, descuento?.tipo ?? null, descuento?.valor ?? 0, descuentoMonto, total,
+          input.notas?.trim() || null, input.validaHasta || null, id,
+        ],
+      );
+      await conn.query('DELETE FROM cotizacion_detalle WHERE cotizacion_id = ?', [id]);
+      await insertarDetalle(conn, id, input.items);
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
+
+    const cot = await this.getById(id);
+    if (!cot) throw new Error('No se pudo leer la cotización actualizada.');
+    return cot;
+  },
+
+  /** Elimina una cotización y su detalle. Bloqueado si ya fue convertida en venta. */
+  async eliminar(id: number): Promise<void> {
+    const cot = await this.getById(id);
+    if (!cot) throw new Error('Cotización no encontrada.');
+    if (cot.comprobante_id) throw new Error('No se puede eliminar una cotización ya convertida en venta.');
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      await conn.query('DELETE FROM cotizacion_detalle WHERE cotizacion_id = ?', [id]);
+      await conn.query('DELETE FROM cotizaciones WHERE id = ?', [id]);
+      await conn.commit();
+    } catch (e) {
+      await conn.rollback();
+      throw e;
+    } finally {
+      conn.release();
+    }
   },
 
   /**
@@ -196,6 +291,8 @@ export const cotizacionRepo = {
       precioUnitario: d.precio_unitario,
       creditos: d.creditos ?? undefined,
       renueva: d.renueva || undefined,
+      descuentoTipo: d.descuento_tipo ?? undefined,
+      descuentoValor: d.descuento_valor || undefined,
     }));
     const descuento = cot.descuento_tipo && cot.descuento_valor > 0
       ? { tipo: cot.descuento_tipo, valor: cot.descuento_valor }

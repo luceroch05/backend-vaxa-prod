@@ -47,6 +47,28 @@ router.patch('/:id/estado', w(async (req, res) => {
   res.json(await cotizacionRepo.cambiarEstado(Number(req.params.id), estadoId));
 }));
 
+/** PUT /api/admin/cotizaciones/:id — edita cliente/líneas/descuento (si no está convertida). */
+router.put('/:id', w(async (req, res) => {
+  const b = req.body ?? {};
+  res.json(await cotizacionRepo.actualizar(Number(req.params.id), {
+    empresaId: b.empresa_id ?? b.empresaId ?? null,
+    cliente: b.cliente,
+    items: Array.isArray(b.items) ? b.items : [],
+    descuento: b.descuento && Number(b.descuento.valor) > 0
+      ? { tipo: b.descuento.tipo === 'pct' ? 'pct' : 'monto', valor: Number(b.descuento.valor) }
+      : undefined,
+    igvIncluido: b.igv_incluido !== false,
+    notas: b.notas,
+    validaHasta: b.valida_hasta,
+  }));
+}));
+
+/** DELETE /api/admin/cotizaciones/:id — elimina (si no está convertida). */
+router.delete('/:id', w(async (req, res) => {
+  await cotizacionRepo.eliminar(Number(req.params.id));
+  res.json({ ok: true });
+}));
+
 /** GET /api/admin/cotizaciones/:id/pdf — representación en base64. */
 router.get('/:id/pdf', w(async (req, res) => {
   const cot = await cotizacionRepo.getById(Number(req.params.id));
