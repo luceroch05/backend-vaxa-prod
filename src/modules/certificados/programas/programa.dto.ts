@@ -3,6 +3,8 @@ export interface CreateProgramaDto {
   nombre: string;
   descripcion?: string;
   horas_academicas: number;
+  /** Créditos académicos del programa. Opcional (default 0). */
+  creditos?: number;
   /** Etiqueta de las unidades del programa (Unidad / Ciclo / Módulo). Default 'Unidad'. */
   unidad_label?: string;
   /** Nota mínima de aprobación (escala 0-20). Default 11. */

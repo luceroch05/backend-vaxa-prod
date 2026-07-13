@@ -23,6 +23,7 @@ export interface PdfDatos {
   programa_nombre:     string;
   tipo_programa:       string;
   horas_academicas:    number;
+  creditos?:           number;
   fecha_inicio?:       string;
   fecha_fin?:          string;
   modalidad?:          string;
@@ -202,6 +203,7 @@ async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrD
     .replace(/\{programa\}/gi,     datos.programa_nombre)
     .replace(/\{curso\}/gi,        datos.programa_nombre)
     .replace(/\{horas\}/gi,        String(datos.horas_academicas))
+    .replace(/\{creditos\}/gi,     datos.creditos ? String(datos.creditos) : '')
     .replace(/\{fecha\}/gi,        fmtFecha(datos.fecha_emision))
     .replace(/\{fechaInicio\}/gi,  fechaIni)
     .replace(/\{fechaFin\}/gi,     fechaFin);
@@ -334,10 +336,13 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
             const lineY = startY + SIG_IMG_H - 8;
             doc.moveTo(x, lineY).lineTo(x + SIG_W, lineY)
               .strokeColor('#475569').lineWidth(1).stroke();
+            // El nombre puede envolver en varias líneas (sin lineBreak:false). El
+            // cargo se dibuja en `doc.y` (donde terminó el nombre), así SIEMPRE queda
+            // debajo del nombre completo y baja solo si el nombre es más largo.
             doc.font('Helvetica-Bold').fontSize(nameSize).fillColor('#1e293b')
-              .text(f.nombre_autoridad, x, lineY + 3, { width: SIG_W, align: 'center', lineBreak: false });
+              .text(f.nombre_autoridad, x, lineY + 4, { width: SIG_W, align: 'center', lineGap: 1 });
             doc.font('Helvetica-Oblique').fontSize(cargoSize).fillColor('#64748b')
-              .text(f.cargo, x, lineY + 3 + nameSize * 1.3, { width: SIG_W, align: 'center', lineBreak: false });
+              .text(f.cargo, x, doc.y + 2, { width: SIG_W, align: 'center' });
             x += SIG_W + gap;
           }
         }

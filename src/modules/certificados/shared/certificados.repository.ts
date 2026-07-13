@@ -129,9 +129,9 @@ export const programasRepo = {
   async create(tenantSlug: string, dto: CreateProgramaDto, userId?: number): Promise<ProgramaEntity> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [result] = await pool().query<any>(
-      `INSERT INTO programas (empresa_id, tipo_programa_id, nombre, descripcion, horas_academicas, unidad_label, nota_minima, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [empresaId, dto.tipo_programa_id, dto.nombre, dto.descripcion ?? null, dto.horas_academicas,
+      `INSERT INTO programas (empresa_id, tipo_programa_id, nombre, descripcion, horas_academicas, creditos, unidad_label, nota_minima, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, dto.tipo_programa_id, dto.nombre, dto.descripcion ?? null, dto.horas_academicas, dto.creditos ?? 0,
        dto.unidad_label || 'Unidad', dto.nota_minima ?? 11, userId ?? null],
     );
     const prog = (await programasRepo.findById(tenantSlug, result.insertId))!;
@@ -150,6 +150,7 @@ export const programasRepo = {
     if (dto.nombre           !== undefined) { fields.push('nombre = ?');           values.push(dto.nombre); }
     if (dto.descripcion      !== undefined) { fields.push('descripcion = ?');      values.push(dto.descripcion); }
     if (dto.horas_academicas !== undefined) { fields.push('horas_academicas = ?'); values.push(dto.horas_academicas); }
+    if (dto.creditos         !== undefined) { fields.push('creditos = ?');         values.push(dto.creditos); }
     if (dto.tipo_programa_id !== undefined) { fields.push('tipo_programa_id = ?'); values.push(dto.tipo_programa_id); }
     if (dto.unidad_label     !== undefined) { fields.push('unidad_label = ?');     values.push(dto.unidad_label || 'Unidad'); }
     if (dto.nota_minima      !== undefined) { fields.push('nota_minima = ?');       values.push(dto.nota_minima); }
@@ -163,6 +164,7 @@ export const programasRepo = {
         { key: 'nombre', label: 'nombre' },
         { key: 'descripcion', label: 'descripción' },
         { key: 'horas_academicas', label: 'horas' },
+        { key: 'creditos', label: 'créditos' },
         { key: 'tipo_programa_id', label: 'tipo' },
         { key: 'unidad_label', label: 'rótulo de unidad' },
         { key: 'nota_minima', label: 'nota mínima' },
@@ -1450,7 +1452,7 @@ export const emisionRepo = {
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento,
               prog.nombre AS programa_nombre,
-              prog.horas_academicas,
+              prog.horas_academicas, prog.creditos,
               tp.nombre AS tipo_programa_nombre,
               g.id AS grupo_id, g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
               m.nombre AS modalidad_nombre,
@@ -1517,7 +1519,7 @@ export const emisionRepo = {
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento,
               prog.nombre AS programa_nombre,
-              prog.horas_academicas,
+              prog.horas_academicas, prog.creditos,
               tp.nombre AS tipo_programa_nombre,
               g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
               m.nombre AS modalidad_nombre,
@@ -1655,7 +1657,7 @@ export const emisionRepo = {
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento,
               prog.nombre AS programa_nombre,
-              prog.horas_academicas,
+              prog.horas_academicas, prog.creditos,
               tp.nombre AS tipo_programa_nombre,
               g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
               m.nombre AS modalidad_nombre,
@@ -1686,7 +1688,7 @@ export const emisionRepo = {
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento,
               prog.nombre AS programa_nombre,
-              prog.horas_academicas,
+              prog.horas_academicas, prog.creditos,
               tp.nombre AS tipo_programa_nombre,
               g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
               m.nombre AS modalidad_nombre,
@@ -1984,6 +1986,7 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       programa_nombre:      cert.programa_nombre,
       tipo_programa:        cert.tipo_programa_nombre ?? 'Certificado',
       horas_academicas:     cert.horas_academicas ?? 0,
+      creditos:             cert.creditos ?? 0,
       fecha_inicio:         fechaInicio,
       fecha_fin:            fechaFin,
       modalidad:            cert.modalidad_nombre,

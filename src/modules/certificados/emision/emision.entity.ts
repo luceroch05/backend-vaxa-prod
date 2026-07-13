@@ -8,6 +8,7 @@ export class CertificadoEntity {
   programa_nombre?: string;
   tipo_programa_nombre?: string;
   horas_academicas?: number;
+  creditos?: number;
   nombre_grupo?: string;
   fecha_inicio?: string;
   fecha_fin?: string;

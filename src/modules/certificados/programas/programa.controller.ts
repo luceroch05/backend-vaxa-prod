@@ -35,13 +35,15 @@ export async function getPrograma(req: Request, res: Response): Promise<void> {
 }
 
 export async function createPrograma(req: Request, res: Response): Promise<void> {
-  const { tipo_programa_id, nombre, descripcion, horas_academicas } = req.body ?? {};
+  const { tipo_programa_id, nombre, descripcion, horas_academicas, creditos } = req.body ?? {};
   if (!nombre || !tipo_programa_id) {
     res.status(400).json({ error: 'nombre y tipo_programa_id son requeridos' }); return;
   }
-  // Las horas académicas son OPCIONALES: si no vienen, se guarda 0.
+  // Las horas académicas y los créditos son OPCIONALES: si no vienen, se guarda 0.
   res.status(201).json(await programaService.create(tid(req), {
-    tipo_programa_id, nombre, descripcion, horas_academicas: Number(horas_academicas) || 0,
+    tipo_programa_id, nombre, descripcion,
+    horas_academicas: Number(horas_academicas) || 0,
+    creditos: Number(creditos) || 0,
   }, uid(req)));
 }
 
