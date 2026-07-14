@@ -221,10 +221,10 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
         }
 
         // ── LOGOS ─────────────────────────────────────────────
-        const LOGO_W    = 180 * PX;
-        const LOGO_H    = 120 * PX;
-        const LOGO_Y    =  60 * PX;
-        const LOGO_SIDE =  80 * PX;
+        const LOGO_W    = 220 * PX;
+        const LOGO_H    = 135 * PX;
+        const LOGO_Y    =  55 * PX;
+        const LOGO_SIDE =  70 * PX;
         const sorted    = [...datos.logos].sort((a, b) => a.orden - b.orden);
 
         const posiciones: number[] = [];
@@ -244,13 +244,18 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
 
         // ── BLOQUE CENTRAL ────────────────────────────────────
         const tituloSize  = 32 * PX;
+        const otorgaSize  = 18 * PX;
         const nombreSize  = 42 * PX;
         const cuerpoSize  = (cuerpo.length > 200 ? 18 : 20) * PX;
         const programaSize = 22 * PX;
         const textWidth   = W - 2 * (180 * PX);
+        const otorgaStr   = 'Se otorga a:';
 
         doc.font('Helvetica-Bold').fontSize(tituloSize);
         const tituloH = doc.heightOfString(datos.tipo_programa.toUpperCase(), { width: textWidth });
+
+        doc.font('Helvetica').fontSize(otorgaSize);
+        const otorgaH = doc.heightOfString(otorgaStr, { width: textWidth });
 
         doc.font('Times-Bold').fontSize(nombreSize);
         const nombreH = doc.heightOfString(datos.participante_nombre, { width: textWidth, lineGap: 2 });
@@ -262,12 +267,14 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
         const programaStr = `"${datos.programa_nombre}"`;
         const programaH   = doc.heightOfString(programaStr, { width: textWidth, lineGap: 2 });
 
-        const margenTitulo  = 15 * PX;
+        const margenTitulo  = 20 * PX;
+        const margenOtorga  = 10 * PX;
         const margenNombre  = 20 * PX;
         const margenCuerpo  = 20 * PX;
 
         const blockH =
           tituloH  + margenTitulo +
+          otorgaH  + margenOtorga +
           nombreH  + margenNombre +
           cuerpoH  + margenCuerpo +
           programaH;
@@ -283,6 +290,12 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
             width: textWidth, align: 'center', characterSpacing: 1,
           });
         currentY += tituloH + margenTitulo;
+
+        doc.font('Helvetica').fontSize(otorgaSize).fillColor('#475569')
+          .text(otorgaStr, textX, currentY, {
+            width: textWidth, align: 'center',
+          });
+        currentY += otorgaH + margenOtorga;
 
         doc.font('Times-Bold').fontSize(nombreSize).fillColor('#0f172a')
           .text(datos.participante_nombre, textX, currentY, {
@@ -318,8 +331,8 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
         // Máximo 3 firmas en el certificado (igual que los logos).
         const firmasOrdenadas = [...datos.firmas].sort((a, b) => a.orden - b.orden).slice(0, 3);
         if (firmasOrdenadas.length > 0) {
-          const SIG_W     = 150;
-          const SIG_IMG_H = 40;
+          const SIG_W     = 170;
+          const SIG_IMG_H = 54;
           const gap       = firmasOrdenadas.length === 1 ? 0 : firmasOrdenadas.length === 2 ? 90 : 50;
           const totalW    = firmasOrdenadas.length * SIG_W + (firmasOrdenadas.length - 1) * gap;
           const nameSize  = 10;
