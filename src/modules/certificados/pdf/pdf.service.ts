@@ -189,8 +189,24 @@ function pintarActa(doc: any, datos: PdfActaDatos): void {
 }
 
 /* ── Preparación de QR + cuerpo (común a archivo y buffer) ───── */
+/**
+ * URL pública de validación que va en el QR del certificado.
+ *  - Producción (subdominios): definir CERT_PUBLIC_URL=https://certificados.vaxasys.com
+ *    → queda `.../<empresa>/validar` (URL limpia, sin `/certificados`).
+ *  - Local / legacy: si CERT_PUBLIC_URL no está, usa PUBLIC_FRONTEND_URL con la
+ *    estructura de hoy `.../<empresa>/certificados/validar`.
+ * Los certificados YA emitidos llevan su QR grabado; por eso la estructura legacy
+ * debe seguir resolviendo (redirect en el frontend viejo).
+ */
+function buildValidarUrl(empresa: string, codigo: string): string {
+  const certBase = process.env.CERT_PUBLIC_URL?.replace(/\/$/, '');
+  if (certBase) return `${certBase}/${empresa}/validar?codigo=${codigo}`;
+  const legacy = (process.env.PUBLIC_FRONTEND_URL ?? 'http://localhost:5173').replace(/\/$/, '');
+  return `${legacy}/${empresa}/certificados/validar?codigo=${codigo}`;
+}
+
 async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrDataUrl: string }> {
-  const qrUrl    = `${process.env.PUBLIC_FRONTEND_URL ?? 'http://localhost:5173'}/${datos.empresa_nombre}/certificados/validar?codigo=${datos.codigo_unico}`;
+  const qrUrl    = buildValidarUrl(datos.empresa_nombre, datos.codigo_unico);
   const qrDataUrl = await QRCode.toDataURL(qrUrl, { errorCorrectionLevel: 'M', width: 200, margin: 1 });
 
   const fechaIni   = fmtFecha(datos.fecha_inicio);
