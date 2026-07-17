@@ -4,8 +4,10 @@ export class GrupoEntity {
   programa_id!: number;
   programa_nombre?: string;
   nombre_grupo!: string;
-  fecha_inicio!: string;
-  fecha_fin!: string;
+  fecha_inicio!: string;       // Día 1
+  fecha_fin?: string | null;   // legado (rango); aulas nuevas usan los días puntuales
+  fecha_dia2?: string | null;  // Día 2 puntual
+  fecha_dia3?: string | null;  // Día 3 puntual
   dias_semana?: string | null;
   hora_inicio?: string | null;
   hora_fin?: string | null;

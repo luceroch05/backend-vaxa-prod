@@ -3,7 +3,7 @@ import { w } from './shared/router.helper';
 
 import { getCatalogos }                                              from './catalogos/catalogo.controller';
 import { listProgramas, getPrograma, createPrograma, updatePrograma, setActivoPrograma, eliminarPrograma } from './programas/programa.controller';
-import { listGrupos, getGrupo, createGrupo, setActivoGrupo, eliminarGrupo }          from './grupos/grupo.controller';
+import { listGrupos, getGrupo, createGrupo, updateGrupo, setActivoGrupo, eliminarGrupo } from './grupos/grupo.controller';
 import { listParticipantes, getParticipante, createParticipante, buscarParticipante, setActivoParticipante, eliminarParticipante, actualizarParticipante } from './participantes/participante.controller';
 import { listInscripciones, createInscripcion, cambiarEstado, cambiarEstadoMasivo, eliminarInscripcion, inscribir, importarMasivo } from './inscripciones/inscripcion.controller';
 import { listLogos, createLogo, deleteLogo }                         from './logos/logo.controller';
@@ -36,6 +36,7 @@ router.get('/grupos',                           w(listGrupos));
 router.get('/grupos/:id',                       w(getGrupo));
 router.post('/grupos',                          w(createGrupo));
 router.patch('/grupos/:id/activo',    soloAdmin, w(setActivoGrupo));         // archivar/reactivar aula
+router.patch('/grupos/:id',           soloAdmin, w(updateGrupo));            // editar aula
 router.delete('/grupos/:id',          soloAdmin, w(eliminarGrupo));          // borrar aula (con protección)
 
 // Participantes

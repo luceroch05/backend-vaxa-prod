@@ -12,6 +12,8 @@ export class CertificadoEntity {
   nombre_grupo?: string;
   fecha_inicio?: string;
   fecha_fin?: string;
+  fecha_dia2?: string;
+  fecha_dia3?: string;
   modalidad_nombre?: string;
   codigo_unico!: string;
   url?: string;
@@ -33,7 +35,9 @@ export class CertificadoPublicoEntity {
   horas_academicas!: number;
   nombre_grupo!: string;
   fecha_inicio!: string;
-  fecha_fin!: string;
+  fecha_fin?: string;
+  fecha_dia2?: string;
+  fecha_dia3?: string;
   modalidad!: string;
   estado!: string;
   empresa_nombre!: string;

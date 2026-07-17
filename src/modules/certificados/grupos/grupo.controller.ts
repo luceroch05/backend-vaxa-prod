@@ -35,12 +35,28 @@ export async function getGrupo(req: Request, res: Response): Promise<void> {
 }
 
 export async function createGrupo(req: Request, res: Response): Promise<void> {
-  const { programa_id, nombre_grupo, fecha_inicio, fecha_fin, modalidad_id, dias_semana, hora_inicio, hora_fin } = req.body ?? {};
-  if (!programa_id || !nombre_grupo || !fecha_inicio || !fecha_fin || !modalidad_id) {
-    res.status(400).json({ error: 'programa_id, nombre_grupo, fecha_inicio, fecha_fin y modalidad_id son requeridos' }); return;
+  const { programa_id, nombre_grupo, fecha_inicio, fecha_fin, fecha_dia2, fecha_dia3, modalidad_id, dias_semana, hora_inicio, hora_fin } = req.body ?? {};
+  // Día 1 (fecha_inicio) obligatorio; Día 2 y Día 3 puntuales son opcionales.
+  if (!programa_id || !nombre_grupo || !fecha_inicio || !modalidad_id) {
+    res.status(400).json({ error: 'programa_id, nombre_grupo, fecha_inicio y modalidad_id son requeridos' }); return;
   }
   res.status(201).json(await grupoService.create(tid(req), {
-    programa_id, nombre_grupo, fecha_inicio, fecha_fin, modalidad_id,
+    programa_id, nombre_grupo, fecha_inicio, fecha_fin: fecha_fin || null,
+    fecha_dia2: fecha_dia2 || null, fecha_dia3: fecha_dia3 || null, modalidad_id,
     dias_semana: dias_semana || null, hora_inicio: hora_inicio || null, hora_fin: hora_fin || null,
   }, uid(req)));
+}
+
+export async function updateGrupo(req: Request, res: Response): Promise<void> {
+  const { programa_id, nombre_grupo, fecha_inicio, fecha_fin, fecha_dia2, fecha_dia3, modalidad_id, dias_semana, hora_inicio, hora_fin } = req.body ?? {};
+  if (!programa_id || !nombre_grupo || !fecha_inicio || !modalidad_id) {
+    res.status(400).json({ error: 'programa_id, nombre_grupo, fecha_inicio y modalidad_id son requeridos' }); return;
+  }
+  const g = await grupoService.update(tid(req), Number(req.params.id), {
+    programa_id, nombre_grupo, fecha_inicio, fecha_fin: fecha_fin || null,
+    fecha_dia2: fecha_dia2 || null, fecha_dia3: fecha_dia3 || null, modalidad_id,
+    dias_semana: dias_semana || null, hora_inicio: hora_inicio || null, hora_fin: hora_fin || null,
+  }, uid(req));
+  if (!g) { res.status(404).json({ error: 'Aula no encontrada' }); return; }
+  res.json(g);
 }

@@ -26,6 +26,8 @@ export interface PdfDatos {
   creditos?:           number;
   fecha_inicio?:       string;
   fecha_fin?:          string;
+  fecha_dia2?:         string;
+  fecha_dia3?:         string;
   modalidad?:          string;
   fecha_emision:       string;
   codigo_unico:        string;
@@ -74,6 +76,44 @@ function fmtFecha(d?: string): string {
   const [y, m, day] = s.split('-').map(Number);
   const meses = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
   return `${day} de ${meses[m - 1]} de ${y}`;
+}
+
+const MESES_LARGO = ['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+function ymd(d?: string): { y: number; m: number; d: number } | null {
+  if (!d) return null;
+  const s = d.substring(0, 10);
+  if (!s || s === '0000-00-00') return null;
+  const [y, m, dd] = s.split('-').map(Number);
+  if (!y || !m || !dd) return null;
+  return { y, m, d: dd };
+}
+const fechaLarga = (p: { y: number; m: number; d: number }) => `${p.d} de ${MESES_LARGO[p.m - 1]} de ${p.y}`;
+const unirDias = (arr: string[]) =>
+  arr.length === 2 ? `${arr[0]} y ${arr[1]}` : `${arr.slice(0, -1).join(', ')} y ${arr[arr.length - 1]}`;
+
+/** Frase del periodo del certificado (sin el "realizado" delante).
+ *   1 día  → "el 15 de agosto de 2026"
+ *   2-3 días puntuales → "los días 15, 18 y 22 de agosto de 2026"
+ *     (mes/año una sola vez si coinciden; si cruzan mes/año, cada fecha completa)
+ *   aula antigua con rango (solo fecha_fin) → "del 15 al 20 de agosto de 2026" */
+function periodoCurso(inicio?: string, fin?: string, dia2?: string, dia3?: string): string {
+  const parts = [ymd(inicio), ymd(dia2), ymd(dia3)].filter(Boolean) as { y: number; m: number; d: number }[];
+  parts.sort((a, b) => (a.y - b.y) || (a.m - b.m) || (a.d - b.d));
+
+  if (parts.length >= 2) {
+    const mismoMesAnio = parts.every(p => p.y === parts[0].y && p.m === parts[0].m);
+    if (mismoMesAnio) {
+      return `los días ${unirDias(parts.map(p => String(p.d)))} de ${MESES_LARGO[parts[0].m - 1]} de ${parts[0].y}`;
+    }
+    return `los días ${unirDias(parts.map(fechaLarga))}`;
+  }
+
+  const ini = parts[0];
+  const f = ymd(fin);   // compatibilidad con aulas antiguas (rango inicio–fin)
+  if (ini && f && (f.y !== ini.y || f.m !== ini.m || f.d !== ini.d)) {
+    return `del ${fechaLarga(ini)} al ${fechaLarga(f)}`;
+  }
+  return ini ? `el ${fechaLarga(ini)}` : '';
 }
 
 interface ImagenBuffer {
@@ -211,7 +251,10 @@ async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrD
 
   const fechaIni   = fmtFecha(datos.fecha_inicio);
   const fechaFin   = fmtFecha(datos.fecha_fin);
-  const periodo    = fechaIni && fechaFin ? `, realizado del ${fechaIni} al ${fechaFin}` : '';
+  // Periodo según los días del curso: hasta 3 días puntuales → "los días X, Y y Z";
+  // 1 día → "el X"; aula antigua con rango → "del X al Y". Ver periodoCurso.
+  const periodoFrase = periodoCurso(datos.fecha_inicio, datos.fecha_fin, datos.fecha_dia2, datos.fecha_dia3);
+  const periodo    = periodoFrase ? `, realizado ${periodoFrase}` : '';
   const cuerpoAuto = `Por haber completado satisfactoriamente ${datos.tipo_programa} "${datos.programa_nombre}" con una duración de ${datos.horas_academicas} horas académicas${periodo}.`;
   const cuerpo = (datos.texto_personalizado?.trim() || cuerpoAuto)
     .replace(/\{nombre\}/gi,       datos.participante_nombre)

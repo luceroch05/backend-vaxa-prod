@@ -488,7 +488,7 @@ export const notasRepo = {
     const [rows] = await pool().query<any[]>(
       `SELECT i.id AS inscripcion_id, i.empresa_id, i.estado_id, ei.nombre AS estado_nombre,
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre, p.numero_documento,
-              g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
+              g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3,
               prog.id AS programa_id, prog.nombre AS programa_nombre,
               prog.unidad_label, prog.nota_minima, prog.horas_academicas,
               e.razon_social AS empresa_nombre, e.tenant_slug
@@ -618,9 +618,10 @@ export const gruposRepo = {
   async create(tenantSlug: string, dto: CreateGrupoDto, userId?: number): Promise<GrupoEntity> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [result] = await pool().query<any>(
-      `INSERT INTO grupos_programas (empresa_id, programa_id, nombre_grupo, fecha_inicio, fecha_fin, dias_semana, hora_inicio, hora_fin, modalidad_id, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [empresaId, dto.programa_id, dto.nombre_grupo, dto.fecha_inicio, dto.fecha_fin,
+      `INSERT INTO grupos_programas (empresa_id, programa_id, nombre_grupo, fecha_inicio, fecha_fin, fecha_dia2, fecha_dia3, dias_semana, hora_inicio, hora_fin, modalidad_id, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, dto.programa_id, dto.nombre_grupo, dto.fecha_inicio, dto.fecha_fin ?? null,
+       dto.fecha_dia2 ?? null, dto.fecha_dia3 ?? null,
        dto.dias_semana ?? null, dto.hora_inicio ?? null, dto.hora_fin ?? null,
        dto.modalidad_id, userId ?? null],
     );
@@ -628,6 +629,31 @@ export const gruposRepo = {
     auditoriaRepo.registrar({
       empresaId, usuarioId: userId, accion: 'crear', entidad: 'aula', entidadId: grupo.id, entidadNombre: grupo.nombre_grupo,
       descripcion: `Creó el aula "${grupo.nombre_grupo}" en el programa "${grupo.programa_nombre}"`,
+    });
+    return grupo;
+  },
+
+  async update(tenantSlug: string, id: number, dto: CreateGrupoDto, userId?: number): Promise<GrupoEntity | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    // Verificamos existencia aparte: un UPDATE sin cambios reporta affectedRows=0
+    // aunque la fila exista, así que no podemos usar eso para el 404.
+    const existe = await gruposRepo.findById(tenantSlug, id);
+    if (!existe) return null;
+    await pool().query<any>(
+      `UPDATE grupos_programas
+          SET programa_id = ?, nombre_grupo = ?, fecha_inicio = ?, fecha_fin = ?,
+              fecha_dia2 = ?, fecha_dia3 = ?,
+              dias_semana = ?, hora_inicio = ?, hora_fin = ?, modalidad_id = ?
+        WHERE id = ? AND empresa_id = ?`,
+      [dto.programa_id, dto.nombre_grupo, dto.fecha_inicio, dto.fecha_fin ?? null,
+       dto.fecha_dia2 ?? null, dto.fecha_dia3 ?? null,
+       dto.dias_semana ?? null, dto.hora_inicio ?? null, dto.hora_fin ?? null, dto.modalidad_id,
+       id, empresaId],
+    );
+    const grupo = (await gruposRepo.findById(tenantSlug, id))!;
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'aula', entidadId: grupo.id, entidadNombre: grupo.nombre_grupo,
+      descripcion: `Editó el aula "${grupo.nombre_grupo}" del programa "${grupo.programa_nombre}"`,
     });
     return grupo;
   },
@@ -1454,7 +1480,7 @@ export const emisionRepo = {
               prog.nombre AS programa_nombre,
               prog.horas_academicas, prog.creditos,
               tp.nombre AS tipo_programa_nombre,
-              g.id AS grupo_id, g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
+              g.id AS grupo_id, g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3, g.fecha_dia2, g.fecha_dia3,
               m.nombre AS modalidad_nombre,
               ec.nombre AS estado_nombre
        FROM certificados c
@@ -1521,7 +1547,7 @@ export const emisionRepo = {
               prog.nombre AS programa_nombre,
               prog.horas_academicas, prog.creditos,
               tp.nombre AS tipo_programa_nombre,
-              g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
+              g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3,
               m.nombre AS modalidad_nombre,
               ec.nombre AS estado_nombre,
               e.razon_social AS empresa_nombre, e.tenant_slug
@@ -1659,7 +1685,7 @@ export const emisionRepo = {
               prog.nombre AS programa_nombre,
               prog.horas_academicas, prog.creditos,
               tp.nombre AS tipo_programa_nombre,
-              g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
+              g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3,
               m.nombre AS modalidad_nombre,
               e.razon_social AS empresa_nombre, e.tenant_slug
        FROM certificados c
@@ -1690,7 +1716,7 @@ export const emisionRepo = {
               prog.nombre AS programa_nombre,
               prog.horas_academicas, prog.creditos,
               tp.nombre AS tipo_programa_nombre,
-              g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
+              g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3,
               m.nombre AS modalidad_nombre,
               e.razon_social AS empresa_nombre, e.tenant_slug
        FROM inscripciones i
@@ -1732,7 +1758,7 @@ export const emisionRepo = {
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento, td.codigo AS tipo_doc,
               prog.nombre AS programa_nombre, prog.horas_academicas,
-              g.nombre_grupo, g.fecha_inicio, g.fecha_fin,
+              g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3,
               m.nombre AS modalidad, ec.nombre AS estado,
               e.razon_social AS empresa_nombre, e.logo_url AS empresa_logo
        FROM certificados c
@@ -1938,6 +1964,9 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
     const fechaFin = cert.fecha_fin
       ? (typeof cert.fecha_fin === 'string' ? cert.fecha_fin : new Date(cert.fecha_fin).toISOString().substring(0, 10))
       : undefined;
+    const aYmdOpt = (v: any) => v ? (typeof v === 'string' ? v.substring(0, 10) : new Date(v).toISOString().substring(0, 10)) : undefined;
+    const fechaDia2 = aYmdOpt(cert.fecha_dia2);
+    const fechaDia3 = aYmdOpt(cert.fecha_dia3);
 
     // Acta de notas (2ª página) — solo si el programa tiene unidades configuradas.
     let acta: any = null;
@@ -1989,6 +2018,8 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       creditos:             cert.creditos ?? 0,
       fecha_inicio:         fechaInicio,
       fecha_fin:            fechaFin,
+      fecha_dia2:           fechaDia2,
+      fecha_dia3:           fechaDia3,
       modalidad:            cert.modalidad_nombre,
       fecha_emision:        fechaEmision,
       codigo_unico:         cert.codigo_unico,
