@@ -2,6 +2,8 @@ export interface CreateInscripcionDto {
   participante_id: number;
   grupo_id: number;
   fecha_inscripcion: string;
+  /** Calidad de participación (Participante, Organizador, Ponente…). Default 'Participante'. */
+  calidad?: string;
 }
 
 export interface CambiarEstadoDto {
@@ -18,4 +20,6 @@ export interface InscribirDto {
   telefono?: string;
   grupo_id: number;
   fecha_inscripcion?: string;
+  /** Calidad de participación. Solo el admin lo puede setear; la web pública NO. */
+  calidad?: string;
 }

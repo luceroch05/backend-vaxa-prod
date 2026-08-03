@@ -10,7 +10,7 @@ export const inscripcionService = {
   importarMasivo: (
     tenantSlug: string,
     grupoId: number,
-    filas: Array<{ tipo_documento_id: number; numero_documento: string; nombres: string; apellidos: string; email?: string; telefono?: string }>,
+    filas: Array<{ tipo_documento_id: number; numero_documento: string; nombres: string; apellidos: string; email?: string; telefono?: string; calidad?: string }>,
     emitir: boolean,
     uid?: number,
   ) => inscripcionesRepo.importarMasivo(tenantSlug, grupoId, filas, emitir, uid),

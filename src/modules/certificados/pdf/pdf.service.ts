@@ -1,8 +1,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as QRCode from 'qrcode';
+import { layoutActivo, parseLayout, pintarLienzo } from '../personalizado/lienzo.service';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const PDFDocument = require('pdfkit');
+// sharp es OPCIONAL: solo se usa para convertir imágenes webp/gif/avif a PNG,
+// porque PDFKit únicamente acepta PNG/JPEG. Si no está instalado, esas imágenes
+// se omiten como antes (degradación, sin romper la generación del PDF).
+let sharp: any = null;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+try { sharp = require('sharp'); } catch { /* sharp no instalado */ }
 
 /* ── Tipos ─────────────────────────────────────────────────── */
 export interface PdfLogo {
@@ -20,6 +27,10 @@ export interface PdfFirma {
 
 export interface PdfDatos {
   participante_nombre: string;
+  /** Primer nombre + apellidos (para la variable {nombreCorto}). */
+  participante_nombre_corto?: string;
+  /** Rol/calidad de participación (para la variable {calidad}). */
+  participante_calidad?: string;
   programa_nombre:     string;
   tipo_programa:       string;
   horas_academicas:    number;
@@ -33,6 +44,8 @@ export interface PdfDatos {
   codigo_unico:        string;
   empresa_nombre:      string;
   texto_personalizado?: string | null;
+  /** JSON del modo "Diseño Personalizado (Lienzo)". null = diseño por defecto. */
+  layout_personalizado?: string | null;
   plantilla_url?:      string | null;
   logos:               PdfLogo[];
   firmas:              PdfFirma[];
@@ -245,7 +258,45 @@ function buildValidarUrl(empresa: string, codigo: string): string {
   return `${legacy}/${empresa}/certificados/validar?codigo=${codigo}`;
 }
 
-async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrDataUrl: string }> {
+/** PDFKit solo dibuja PNG/JPEG. Convierte a PNG (vía sharp) una imagen en otro
+ *  formato (webp, gif, avif…) y la devuelve como data URL png. Si ya es png/jpeg,
+ *  o sharp no está / falla, deja el src intacto. */
+async function aFormatoPdf(src: string | null | undefined): Promise<string | null | undefined> {
+  if (!src || !sharp) return src;
+  const esData = src.startsWith('data:');
+  const ext = esData
+    ? (src.match(/^data:image\/([a-zA-Z0-9+]+);base64,/)?.[1] ?? '').toLowerCase()
+    : path.extname(src).toLowerCase().replace('.', '');
+  if (ext === 'png' || ext === 'jpg' || ext === 'jpeg') return src;   // ya compatible
+  try {
+    let input: Buffer;
+    if (esData) {
+      input = Buffer.from(src.substring(src.indexOf(',') + 1), 'base64');
+    } else {
+      const limpio = src.replace(/^\/+/, '');
+      const abs = limpio.startsWith('uploads/')
+        ? path.join(process.cwd(), limpio)
+        : path.join(process.cwd(), 'public', limpio);
+      if (!fs.existsSync(abs)) return src;
+      input = fs.readFileSync(abs);
+    }
+    const png = await sharp(input).png().toBuffer();
+    return `data:image/png;base64,${png.toString('base64')}`;
+  } catch (e) {
+    console.warn('[pdf] No se pudo convertir imagen a PNG:', (e as Error).message);
+    return src;
+  }
+}
+
+/** Convierte fondo, logos y firmas de `datos` a formatos que PDFKit soporta. */
+async function asegurarImagenesPdf(datos: PdfDatos): Promise<void> {
+  datos.plantilla_url = (await aFormatoPdf(datos.plantilla_url)) ?? null;
+  for (const l of datos.logos)  l.imagen = (await aFormatoPdf(l.imagen)) ?? l.imagen;
+  for (const f of datos.firmas) f.imagen = (await aFormatoPdf(f.imagen)) ?? f.imagen;
+}
+
+async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrDataUrl: string; vars: Record<string, string> }> {
+  await asegurarImagenesPdf(datos);   // webp/gif → png (PDFKit solo acepta png/jpeg)
   const qrUrl    = buildValidarUrl(datos.empresa_nombre, datos.codigo_unico);
   const qrDataUrl = await QRCode.toDataURL(qrUrl, { errorCorrectionLevel: 'M', width: 200, margin: 1 });
 
@@ -256,22 +307,48 @@ async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrD
   const periodoFrase = periodoCurso(datos.fecha_inicio, datos.fecha_fin, datos.fecha_dia2, datos.fecha_dia3);
   const periodo    = periodoFrase ? `, realizado ${periodoFrase}` : '';
   const cuerpoAuto = `Por haber completado satisfactoriamente ${datos.tipo_programa} "${datos.programa_nombre}" con una duración de ${datos.horas_academicas} horas académicas${periodo}.`;
-  const cuerpo = (datos.texto_personalizado?.trim() || cuerpoAuto)
-    .replace(/\{nombre\}/gi,       datos.participante_nombre)
-    .replace(/\{participante\}/gi, datos.participante_nombre)
-    .replace(/\{programa\}/gi,     datos.programa_nombre)
-    .replace(/\{curso\}/gi,        datos.programa_nombre)
-    .replace(/\{horas\}/gi,        String(datos.horas_academicas))
-    .replace(/\{creditos\}/gi,     datos.creditos ? String(datos.creditos) : '')
-    .replace(/\{fecha\}/gi,        fmtFecha(datos.fecha_emision))
-    .replace(/\{fechaInicio\}/gi,  fechaIni)
-    .replace(/\{fechaFin\}/gi,     fechaFin);
 
-  return { cuerpo, qrDataUrl };
+  // Mapa de variables — fuente única para el cuerpo y para los campos del lienzo.
+  const vars: Record<string, string> = {
+    nombre:       datos.participante_nombre,
+    participante: datos.participante_nombre,
+    nombreCorto:  datos.participante_nombre_corto ?? datos.participante_nombre,
+    calidad:      datos.participante_calidad ?? 'Participante',
+    programa:     datos.programa_nombre,
+    curso:        datos.programa_nombre,
+    tipo:         datos.tipo_programa,
+    horas:        String(datos.horas_academicas),
+    creditos:     datos.creditos ? String(datos.creditos) : '',
+    fecha:        fmtFecha(datos.fecha_emision),
+    fechaInicio:  fechaIni,
+    fechaFin:     fechaFin,
+    // Mes + año de emisión, ej. "septiembre 2026" (para "Miraflores, {mesEmision}.").
+    mesEmision:   (() => { const p = ymd(datos.fecha_emision); return p ? `${MESES_LARGO[p.m - 1]} ${p.y}` : ''; })(),
+    codigo:       datos.codigo_unico,
+    empresa:      datos.empresa_nombre,
+  };
+
+  const expandir = (t: string) => t.replace(/\{(\w+)\}/g, (_, k) => {
+    const key = Object.keys(vars).find(v => v.toLowerCase() === String(k).toLowerCase());
+    return key ? vars[key] : '';
+  });
+
+  const cuerpo = expandir(datos.texto_personalizado?.trim() || cuerpoAuto);
+  // {cuerpo} disponible como variable de los campos del lienzo (ya expandido).
+  vars.cuerpo = cuerpo;
+
+  return { cuerpo, qrDataUrl, vars };
 }
 
 /* ── Dibujo del certificado (idéntico para PDF en disco y preview en memoria) ─ */
-function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl: string): void {
+function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl: string, vars: Record<string, string>): void {
+  // Modo "Diseño Personalizado (Lienzo)": si la empresa tiene un diseño a medida
+  // activo, se delega en el módulo aislado (personalizado/) y se omite TODO el
+  // layout por defecto de abajo. El motor normal queda intacto.
+  const layout = parseLayout(datos.layout_personalizado);
+  if (layout && layoutActivo(datos.layout_personalizado)) {
+    pintarLienzo(doc, datos, qrDataUrl, vars, layout, { W, H, PX, imagenABuffer });
+  } else {
         // ── FONDO ────────────────────────────────────────────
         const fondo = imagenABuffer(datos.plantilla_url);
         if (fondo) {
@@ -428,7 +505,10 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
           .text('Certificado generado por Vaxa — Sistema de Certificación',
             0, H - 18, { width: W, align: 'center', lineBreak: false });
 
+  } // ── fin del diseño por defecto ──
+
         // ── PÁGINA 2: ACTA DE NOTAS ───────────────────────────
+        // Común a ambos modos: el acta de notas no depende del diseño del certificado.
         if (datos.acta && datos.acta.unidades.length > 0) {
           doc.addPage({ size: 'A4', layout: 'landscape', margin: 50 });
           pintarActa(doc, datos.acta);
@@ -458,7 +538,7 @@ export const pdfService = {
 
     const filename   = `${datos.codigo_unico}.pdf`;
     const outputPath = path.join(outputDir, filename);
-    const { cuerpo, qrDataUrl } = await prepararContenido(datos);
+    const { cuerpo, qrDataUrl, vars } = await prepararContenido(datos);
 
     return new Promise<string>((resolve, reject) => {
       try {
@@ -468,7 +548,7 @@ export const pdfService = {
         });
         const stream = fs.createWriteStream(outputPath);
         doc.pipe(stream);
-        pintarCertificado(doc, datos, cuerpo, qrDataUrl);
+        pintarCertificado(doc, datos, cuerpo, qrDataUrl, vars);
         doc.end();
         stream.on('finish', () => {
           const rel = path.relative(process.cwd(), outputPath).replace(/\\/g, '/');
@@ -482,7 +562,7 @@ export const pdfService = {
   /** Genera el PDF en memoria (sin escribir en disco). Lo usa la previsualización:
    *  mismo motor y mismo dibujo que `generar`, así el preview es idéntico al PDF real. */
   async generarBuffer(datos: PdfDatos): Promise<Buffer> {
-    const { cuerpo, qrDataUrl } = await prepararContenido(datos);
+    const { cuerpo, qrDataUrl, vars } = await prepararContenido(datos);
 
     return new Promise<Buffer>((resolve, reject) => {
       try {
@@ -494,7 +574,7 @@ export const pdfService = {
         doc.on('data', (c: Buffer) => chunks.push(c));
         doc.on('end', () => resolve(Buffer.concat(chunks)));
         doc.on('error', reject);
-        pintarCertificado(doc, datos, cuerpo, qrDataUrl);
+        pintarCertificado(doc, datos, cuerpo, qrDataUrl, vars);
         // Marca de agua en TODAS las páginas (certificado + acta) para que el
         // preview no pueda usarse como documento real sin emitir.
         const range = doc.bufferedPageRange();

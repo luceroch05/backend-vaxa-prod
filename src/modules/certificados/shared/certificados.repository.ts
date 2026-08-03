@@ -852,9 +852,9 @@ export const inscripcionesRepo = {
     if (dup) throw new Error('El estudiante ya está inscrito en este grupo.');
 
     const [result] = await pool().query<any>(
-      `INSERT INTO inscripciones (empresa_id, participante_id, grupo_id, estado_id, fecha_inscripcion, user_crea_id)
-       VALUES (?, ?, ?, 1, ?, ?)`,
-      [empresaId, dto.participante_id, dto.grupo_id, dto.fecha_inscripcion, userId ?? null],
+      `INSERT INTO inscripciones (empresa_id, participante_id, grupo_id, estado_id, calidad, fecha_inscripcion, user_crea_id)
+       VALUES (?, ?, ?, 1, ?, ?, ?)`,
+      [empresaId, dto.participante_id, dto.grupo_id, (dto.calidad?.trim() || 'Participante'), dto.fecha_inscripcion, userId ?? null],
     );
     const [rows] = await pool().query<any[]>(
       `SELECT i.*, ei.nombre AS estado_nombre FROM inscripciones i
@@ -886,6 +886,7 @@ export const inscripcionesRepo = {
       participante_id:   participante.id,
       grupo_id:          dto.grupo_id,
       fecha_inscripcion: dto.fecha_inscripcion ?? new Date().toISOString().split('T')[0],
+      calidad:           dto.calidad,
     }, userId);
 
     const [gr] = await pool().query<any[]>(
@@ -919,7 +920,7 @@ export const inscripcionesRepo = {
   async importarMasivo(
     tenantSlug: string,
     grupoId: number,
-    filas: Array<{ tipo_documento_id: number; numero_documento: string; nombres: string; apellidos: string; email?: string; telefono?: string }>,
+    filas: Array<{ tipo_documento_id: number; numero_documento: string; nombres: string; apellidos: string; email?: string; telefono?: string; calidad?: string }>,
     emitir: boolean,
     userId?: number,
   ) {
@@ -971,6 +972,7 @@ export const inscripcionesRepo = {
           const ins = await inscripcionesRepo.create(tenantSlug, {
             participante_id: participante.id, grupo_id: grupoId,
             fecha_inscripcion: new Date().toISOString().split('T')[0],
+            calidad: f.calidad,
           }, userId);
           inscripcionId = ins.id;
         }
@@ -1364,13 +1366,14 @@ export const configRepo = {
 
     await pool().query(
       `INSERT INTO configuraciones_certificado
-         (empresa_id, programa_id, grupo_id, plantilla_url, texto_personalizado, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?)
+         (empresa_id, programa_id, grupo_id, plantilla_url, texto_personalizado, layout_personalizado, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
-         plantilla_url       = VALUES(plantilla_url),
-         texto_personalizado = VALUES(texto_personalizado),
-         user_actua_id       = ?`,
-      [empresaId, programaId, grupoId, guardarImagen(dto.plantilla_url, 'plantillas') ?? null, dto.texto_personalizado ?? null, userId ?? null, userId ?? null],
+         plantilla_url        = VALUES(plantilla_url),
+         texto_personalizado  = VALUES(texto_personalizado),
+         layout_personalizado = VALUES(layout_personalizado),
+         user_actua_id        = ?`,
+      [empresaId, programaId, grupoId, guardarImagen(dto.plantilla_url, 'plantillas') ?? null, dto.texto_personalizado ?? null, dto.layout_personalizado ?? null, userId ?? null, userId ?? null],
     );
 
     const [rows] = await pool().query<any[]>(
@@ -1430,6 +1433,7 @@ export const configRepo = {
       grupo_id:           grupoId,
       plantilla_url:      base.plantilla_url,
       texto_personalizado: (base as any).texto_personalizado ?? null,
+      layout_personalizado: (base as any).layout_personalizado ?? null,
       logo_ids:           base.logos.map(l => l.id),
       firma_ids:          base.firmas.map(f => f.id),
     }, userId);
@@ -1943,13 +1947,21 @@ function zipearCerts(rows: any[]): Promise<Buffer | null> {
  *  salga idéntico al PDF final. NO escribe en BD ni en disco. */
 async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDatos> {
   // Obtener grupo_id de la inscripción (para buscar config específica del grupo)
+  // y de paso el nombre corto = primer nombre + apellidos (variable {nombreCorto}).
   let grupoId = 0;
+  let nombreCorto: string = cert.participante_nombre;
+  let calidad = 'Participante';
     if (cert.inscripcion_id) {
       const [insRows] = await pool().query<any[]>(
-        'SELECT grupo_id FROM inscripciones WHERE id = ? LIMIT 1',
+        `SELECT i.grupo_id, i.calidad, SUBSTRING_INDEX(p.nombres, ' ', 1) AS primer_nombre, p.apellidos
+           FROM inscripciones i JOIN participantes p ON p.id = i.participante_id
+          WHERE i.id = ? LIMIT 1`,
         [cert.inscripcion_id],
       );
-      grupoId = (insRows as any[])[0]?.grupo_id ?? 0;
+      const r = (insRows as any[])[0];
+      grupoId = r?.grupo_id ?? 0;
+      if (r?.primer_nombre && r?.apellidos) nombreCorto = `${r.primer_nombre} ${r.apellidos}`.trim();
+      if (r?.calidad) calidad = String(r.calidad);
     }
 
     // Buscar config: primero la del grupo, fallback a la del programa
@@ -2011,7 +2023,9 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
     }
 
     return {
-      participante_nombre:  cert.participante_nombre,
+      participante_nombre:      cert.participante_nombre,
+      participante_nombre_corto: nombreCorto,
+      participante_calidad:      calidad,
       programa_nombre:      cert.programa_nombre,
       tipo_programa:        cert.tipo_programa_nombre ?? 'Certificado',
       horas_academicas:     cert.horas_academicas ?? 0,
@@ -2025,6 +2039,7 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       codigo_unico:         cert.codigo_unico,
       empresa_nombre:       cert.tenant_slug ?? tenantSlug,
       texto_personalizado:  (config as any)?.texto_personalizado ?? null,
+      layout_personalizado: (config as any)?.layout_personalizado ?? null,
       plantilla_url:        config?.plantilla_url ?? null,
       logos: logosDatos,
       firmas: (config?.firmas ?? []).map((f: any) => ({

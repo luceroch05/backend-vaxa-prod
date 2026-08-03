@@ -10,10 +10,11 @@ export async function getConfig(req: Request, res: Response): Promise<void> {
 }
 
 export async function upsertConfig(req: Request, res: Response): Promise<void> {
-  const { plantilla_url, texto_personalizado, logo_ids, firma_ids, grupo_id } = req.body ?? {};
+  const { plantilla_url, texto_personalizado, layout_personalizado, logo_ids, firma_ids, grupo_id } = req.body ?? {};
   res.json(await configService.upsert(tid(req), Number(req.params.programaId), {
     plantilla_url:      plantilla_url || null,
     texto_personalizado: texto_personalizado || null,
+    layout_personalizado: layout_personalizado ?? null,   // JSON del modo lienzo
     grupo_id:           grupo_id ?? 0,
     logo_ids:  Array.isArray(logo_ids)  ? logo_ids  : [],
     firma_ids: Array.isArray(firma_ids) ? firma_ids : [],
