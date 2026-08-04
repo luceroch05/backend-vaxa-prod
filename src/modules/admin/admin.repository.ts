@@ -14,6 +14,27 @@ const slugify = (s: string) =>
     .normalize('NFD').replace(/[̀-ͯ]/g, '')   // sin acentos
     .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
+/**
+ * Auto-sana la columna `empresas.permite_diseno` (servicio a medida "Diseño
+ * personalizado / Lienzo" que Vaxa activa por empresa). Si no existe, la crea.
+ * Se corre al operar empresas, así no hace falta migración manual.
+ */
+let _ensuredDiseno = false;
+async function ensurePermiteDiseno(): Promise<void> {
+  if (_ensuredDiseno) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'empresas'
+        AND COLUMN_NAME = 'permite_diseno' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query(
+      `ALTER TABLE empresas ADD COLUMN permite_diseno TINYINT(1) NOT NULL DEFAULT 0 AFTER activo`,
+    );
+  }
+  _ensuredDiseno = true;
+}
+
 export interface CrearEmpresaDto {
   razon_social: string;
   tenant_slug?: string;
@@ -23,6 +44,7 @@ export interface CrearEmpresaDto {
   logo?: string;            // data URL base64
   plan_id?: number;         // plan con el que arranca (default: Básico)
   ciclo_id?: number;        // ciclo de facturación (default: mensual)
+  permite_diseno?: boolean; // servicio a medida (Lienzo) que activa Vaxa por empresa
 }
 
 export interface EditarEmpresaDto {
@@ -33,6 +55,7 @@ export interface EditarEmpresaDto {
   tipo_doc?: string;
   logo?: string;            // data URL base64; '' para quitar
   activo?: boolean;
+  permite_diseno?: boolean; // servicio a medida (Lienzo) que activa Vaxa por empresa
 }
 
 export interface CrearUsuarioDto {
@@ -56,8 +79,10 @@ export interface EditarUsuarioDto {
 export const adminRepo = {
   /** Empresas con saldo y consumo (para el panel de Vaxa). */
   async listEmpresas() {
+    await ensurePermiteDiseno();
     const [rows] = await pool().query<any[]>(
       `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo,
+              permite_diseno,
               creditos_disponibles, creditos_asignados_total,
               (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
        FROM empresas ORDER BY razon_social`,
@@ -67,6 +92,7 @@ export const adminRepo = {
 
   /** Actualiza los datos de una empresa. */
   async updateEmpresa(id: number, dto: EditarEmpresaDto) {
+    await ensurePermiteDiseno();
     const [exist] = await pool().query<any[]>('SELECT id FROM empresas WHERE id = ? LIMIT 1', [id]);
     if (!(exist as any[]).length) throw new Error('Empresa no encontrada');
 
@@ -89,6 +115,7 @@ export const adminRepo = {
     if (dto.tipo_doc !== undefined){ fields.push('tipo_doc = ?'); values.push(dto.tipo_doc || '6'); }
     if (dto.logo !== undefined)    { fields.push('logo_url = ?'); values.push(guardarImagen(dto.logo, 'empresas') || null); }
     if (dto.activo !== undefined)  { fields.push('activo = ?');  values.push(dto.activo ? 1 : 0); }
+    if (dto.permite_diseno !== undefined) { fields.push('permite_diseno = ?'); values.push(dto.permite_diseno ? 1 : 0); }
 
     if (fields.length) {
       values.push(id);
@@ -97,6 +124,7 @@ export const adminRepo = {
 
     const [rows] = await pool().query<any[]>(
       `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo,
+              permite_diseno,
               creditos_disponibles, creditos_asignados_total,
               (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
        FROM empresas WHERE id = ?`, [id],
@@ -167,6 +195,7 @@ export const adminRepo = {
 
   /** Crea una empresa nueva. Genera slug si no se pasa y valida unicidad. */
   async crearEmpresa(dto: CrearEmpresaDto, userId?: number) {
+    await ensurePermiteDiseno();
     const razon = dto.razon_social?.trim();
     if (!razon) throw new Error('La razón social es requerida');
 
@@ -185,8 +214,8 @@ export const adminRepo = {
     }
 
     const [res] = await pool().query<any>(
-      `INSERT INTO empresas (razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo) VALUES (?, ?, ?, ?, ?, ?, 1)`,
-      [razon, slug, dto.dominio?.trim() || null, dto.ruc?.trim() || null, dto.tipo_doc || '6', guardarImagen(dto.logo, 'empresas') || null],
+      `INSERT INTO empresas (razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo, permite_diseno) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+      [razon, slug, dto.dominio?.trim() || null, dto.ruc?.trim() || null, dto.tipo_doc || '6', guardarImagen(dto.logo, 'empresas') || null, dto.permite_diseno ? 1 : 0],
     );
     const empresaId = res.insertId as number;
 
@@ -231,7 +260,7 @@ export const adminRepo = {
     }
 
     const [rows] = await pool().query<any[]>(
-      `SELECT id, razon_social, tenant_slug, ruc, activo, creditos_disponibles, creditos_asignados_total
+      `SELECT id, razon_social, tenant_slug, ruc, activo, permite_diseno, creditos_disponibles, creditos_asignados_total
        FROM empresas WHERE id = ?`, [empresaId],
     );
     return (rows as any[])[0];

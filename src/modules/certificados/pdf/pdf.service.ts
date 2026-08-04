@@ -386,6 +386,9 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
         const programaSize = 22 * PX;
         const textWidth   = W - 2 * (180 * PX);
         const otorgaStr   = 'Se otorga a:';
+        // En el certificado va el nombre CORTO (primer nombre + apellidos). El nombre
+        // completo se reserva para la página de validación. Cae al completo si no hay corto.
+        const nombreCert  = datos.participante_nombre_corto ?? datos.participante_nombre;
 
         doc.font('Helvetica-Bold').fontSize(tituloSize);
         const tituloH = doc.heightOfString(datos.tipo_programa.toUpperCase(), { width: textWidth });
@@ -394,7 +397,7 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
         const otorgaH = doc.heightOfString(otorgaStr, { width: textWidth });
 
         doc.font('Times-Bold').fontSize(nombreSize);
-        const nombreH = doc.heightOfString(datos.participante_nombre, { width: textWidth, lineGap: 2 });
+        const nombreH = doc.heightOfString(nombreCert, { width: textWidth, lineGap: 2 });
 
         doc.font('Helvetica').fontSize(cuerpoSize);
         const cuerpoH = doc.heightOfString(cuerpo, { width: textWidth, lineGap: 4 });
@@ -434,7 +437,7 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
         currentY += otorgaH + margenOtorga;
 
         doc.font('Times-Bold').fontSize(nombreSize).fillColor('#0f172a')
-          .text(datos.participante_nombre, textX, currentY, {
+          .text(nombreCert, textX, currentY, {
             width: textWidth, align: 'center', lineGap: 2,
           });
         currentY += nombreH + margenNombre;

@@ -28,6 +28,30 @@ import type { CreateFirmaDto }                         from '../firmas/firma.dto
 import type { UpsertConfigDto }                        from '../config/config.dto';
 import type { CreateUnidadDto, UpdateUnidadDto }        from '../unidades/unidad.dto';
 import type { NotaInput }                               from '../notas/nota.dto';
+
+/**
+ * Auto-sana la columna `configuraciones_certificado.layout_personalizado` (modo
+ * "Diseño personalizado / Lienzo"). Si no existe —migración no corrida en prod—
+ * la crea. Evita el caso "en local sí, en prod no": sin la columna el layout no
+ * se persiste y el certificado sale con el diseño por defecto. Se ejecuta al
+ * guardar la config (una sola vez por proceso).
+ */
+let _ensuredLayout = false;
+async function ensureLayoutPersonalizado(): Promise<void> {
+  if (_ensuredLayout) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'configuraciones_certificado'
+        AND COLUMN_NAME = 'layout_personalizado' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query(
+      `ALTER TABLE configuraciones_certificado
+         ADD COLUMN layout_personalizado TEXT NULL AFTER texto_personalizado`,
+    );
+  }
+  _ensuredLayout = true;
+}
 import archiver = require('archiver');
 import { PassThrough } from 'stream';
 // ============================================================
@@ -1361,6 +1385,7 @@ export const configRepo = {
   },
 
   async upsert(tenantSlug: string, programaId: number, dto: UpsertConfigDto, userId?: number): Promise<ConfigCertificadoEntity> {
+    await ensureLayoutPersonalizado();   // crea la columna si la migración no corrió en prod
     const empresaId = await getEmpresaId(tenantSlug);
     const grupoId = dto.grupo_id ?? 0;
 

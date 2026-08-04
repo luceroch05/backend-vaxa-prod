@@ -232,6 +232,20 @@ export const planRepo = {
 
     const plan = sus.length ? PlanEntity.fromRow(sus[0]) : null;
 
+    // El "Diseño personalizado (Lienzo)" NO se hereda del plan: es un servicio a
+    // medida que Vaxa activa POR EMPRESA (empresas.permite_diseno). El panel del
+    // cliente usa estado.plan.permite_diseno como candado del editor, así que aquí
+    // lo forzamos a reflejar SOLO el flag de la empresa (no el del plan).
+    if (plan) {
+      plan.permite_diseno = false;
+      try {
+        const [ed] = await pool().query<any[]>(
+          'SELECT permite_diseno FROM empresas WHERE id = ? LIMIT 1', [empresaId],
+        );
+        plan.permite_diseno = !!Number((ed as any[])[0]?.permite_diseno);
+      } catch { /* columna aún no creada: queda en false */ }
+    }
+
     const [cm] = await pool().query<any[]>(
       `SELECT incluidos, emitidos, adicionales, monto_adicional
          FROM consumo_mensual WHERE empresa_id = ? AND anio = ? AND mes = ?`,

@@ -110,8 +110,9 @@ export function layoutActivo(raw?: string | null): boolean {
    Se registra en el PDFDocument si los .ttf están disponibles. Si no,
    el sans cae a Helvetica (built-in) sin romper nada. */
 const ASSET_DIRS = [
-  path.join(process.cwd(), 'assets', 'fonts'),
-  path.join(__dirname, '..', '..', '..', '..', 'assets', 'fonts'),
+  path.join(process.cwd(), 'assets', 'fonts'),                        // <raíz>/assets/fonts (dev y prod si subes assets/)
+  path.join(__dirname, '..', '..', '..', '..', 'assets', 'fonts'),   // <raíz>/assets/fonts vía __dirname
+  path.join(__dirname, '..', '..', '..', 'assets', 'fonts'),         // dist/assets/fonts (postbuild copia assets → dist; así viajan con el dist)
 ];
 function fontFile(sub: string, file: string): string | null {
   for (const base of ASSET_DIRS) {
