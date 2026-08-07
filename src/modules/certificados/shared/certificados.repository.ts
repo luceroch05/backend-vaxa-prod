@@ -272,8 +272,8 @@ export const unidadesRepo = {
   async create(tenantSlug: string, dto: CreateUnidadDto, userId?: number): Promise<UnidadEntity> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [result] = await pool().query<any>(
-      `INSERT INTO unidades (empresa_id, programa_id, nombre, orden, user_crea_id) VALUES (?, ?, ?, ?, ?)`,
-      [empresaId, dto.programa_id, dto.nombre, dto.orden ?? 1, userId ?? null],
+      `INSERT INTO unidades (empresa_id, programa_id, nombre, orden, creditos, user_crea_id) VALUES (?, ?, ?, ?, ?, ?)`,
+      [empresaId, dto.programa_id, dto.nombre, dto.orden ?? 1, dto.creditos ?? 0, userId ?? null],
     );
     const [rows] = await pool().query<any[]>(`SELECT * FROM unidades WHERE id = ?`, [result.insertId]);
     const unidad = UnidadEntity.fromRow(rows[0]);
@@ -292,8 +292,9 @@ export const unidadesRepo = {
     const antes = prevRows[0] ? UnidadEntity.fromRow(prevRows[0]) : null;
     const fields: string[] = [];
     const values: any[]    = [];
-    if (dto.nombre !== undefined) { fields.push('nombre = ?'); values.push(dto.nombre); }
-    if (dto.orden  !== undefined) { fields.push('orden = ?');  values.push(dto.orden); }
+    if (dto.nombre   !== undefined) { fields.push('nombre = ?');   values.push(dto.nombre); }
+    if (dto.orden    !== undefined) { fields.push('orden = ?');    values.push(dto.orden); }
+    if (dto.creditos !== undefined) { fields.push('creditos = ?'); values.push(dto.creditos); }
     if (fields.length) {
       fields.push('user_actua_id = ?'); values.push(userId ?? null, id, empresaId);
       await pool().query(`UPDATE unidades SET ${fields.join(', ')} WHERE id = ? AND empresa_id = ?`, values);
@@ -304,6 +305,7 @@ export const unidadesRepo = {
       const { texto, detalle } = describirCambios(antes, despues, [
         { key: 'nombre', label: 'nombre' },
         { key: 'orden', label: 'orden' },
+        { key: 'creditos', label: 'créditos' },
       ]);
       if (texto) {
         const [pn] = await pool().query<any[]>('SELECT nombre FROM programas WHERE id = ? AND empresa_id = ?', [despues.programa_id, empresaId]);
@@ -341,10 +343,17 @@ export const unidadesRepo = {
 // NOTAS (por alumno / unidad) + aprobación
 // ============================================================
 
+/** Etiqueta de evaluación que activa el "modo créditos": las unidades NO se
+ *  califican con notas, cada una otorga sus créditos por asistencia y la
+ *  aprobación se marca manualmente (como un programa sin unidades). */
+export const LABEL_CREDITOS = 'Crédito';
+export const esModoCreditos = (unidadLabel?: string | null): boolean =>
+  (unidadLabel ?? '').trim() === LABEL_CREDITOS;
+
 /** Recalcula el estado de la inscripción según el promedio simple de sus notas. */
 async function recomputarEstadoInscripcion(empresaId: number, inscripcionId: number, userId?: number): Promise<void> {
   const [pr] = await pool().query<any[]>(
-    `SELECT prog.id AS programa_id, prog.nota_minima, i.estado_id
+    `SELECT prog.id AS programa_id, prog.nota_minima, prog.unidad_label, i.estado_id
      FROM inscripciones i
      JOIN grupos_programas g ON g.id = i.grupo_id
      JOIN programas prog     ON prog.id = g.programa_id
@@ -352,7 +361,9 @@ async function recomputarEstadoInscripcion(empresaId: number, inscripcionId: num
     [inscripcionId, empresaId],
   );
   if (!pr[0]) return;
-  const { programa_id, nota_minima, estado_id } = pr[0];
+  const { programa_id, nota_minima, unidad_label, estado_id } = pr[0];
+  // Modo créditos: no hay notas, la aprobación es manual (por asistencia).
+  if (esModoCreditos(unidad_label)) return;
   // No tocar RETIRADO (5) ni RECHAZADO (6).
   if (estado_id === 5 || estado_id === 6) return;
 
@@ -455,8 +466,9 @@ export const notasRepo = {
       programa_id:     programa.programa_id,
       programa_nombre: programa.programa_nombre,
       unidad_label:    programa.unidad_label,
+      es_creditos:     esModoCreditos(programa.unidad_label),
       nota_minima:     notaMinima,
-      unidades:        unidades.map(u => ({ id: u.id, nombre: u.nombre, orden: u.orden })),
+      unidades:        unidades.map(u => ({ id: u.id, nombre: u.nombre, orden: u.orden, creditos: Number(u.creditos) })),
       filas,
     };
   },
@@ -535,15 +547,24 @@ export const notasRepo = {
     );
     const mapa = new Map<number, number>();
     (nr as any[]).forEach(n => mapa.set(n.unidad_id, Number(n.nota)));
+    const modoCreditos = esModoCreditos(info.unidad_label);
     const { promedio, completo, aprobado } = resumenFila(mapa, unidades.length, Number(info.nota_minima));
 
     return {
       ...info,
+      es_creditos: modoCreditos,
       nota_minima: Number(info.nota_minima),
-      unidades: unidades.map(u => ({ id: u.id, nombre: u.nombre, orden: u.orden, nota: mapa.get(u.id) ?? null })),
+      total_creditos: unidades.reduce((s, u) => s + Number(u.creditos), 0),
+      unidades: unidades.map(u => ({
+        id: u.id, nombre: u.nombre, orden: u.orden,
+        nota: mapa.get(u.id) ?? null,
+        creditos: Number(u.creditos),
+      })),
       promedio,
       completo,
-      aprobado,
+      // En modo créditos la condición sale del estado de la inscripción (aprobado por
+      // asistencia = 3), no del promedio de notas.
+      aprobado: modoCreditos ? info.estado_id === 3 : aprobado,
     };
   },
 };
@@ -1068,10 +1089,11 @@ export const inscripcionesRepo = {
       const [u] = await pool().query<any[]>(
         `SELECT COUNT(*) AS total
          FROM unidades un
+         JOIN programas prog     ON prog.id = un.programa_id
          JOIN grupos_programas g ON g.programa_id = un.programa_id
          JOIN inscripciones i    ON i.grupo_id = g.id
-         WHERE i.id = ? AND i.empresa_id = ? AND un.activo = 1`,
-        [id, empresaId],
+         WHERE i.id = ? AND i.empresa_id = ? AND un.activo = 1 AND prog.unidad_label <> ?`,
+        [id, empresaId, LABEL_CREDITOS],
       );
       if (Number((u as any[])[0]?.total ?? 0) > 0) {
         throw new Error('Este programa usa notas: la aprobación se define al registrar las notas, no manualmente.');
@@ -1120,10 +1142,11 @@ export const inscripcionesRepo = {
       const [u] = await pool().query<any[]>(
         `SELECT COUNT(*) AS total
          FROM unidades un
+         JOIN programas prog     ON prog.id = un.programa_id
          JOIN grupos_programas g ON g.programa_id = un.programa_id
          JOIN inscripciones i    ON i.grupo_id = g.id
-         WHERE i.id IN (${placeholders}) AND i.empresa_id = ? AND un.activo = 1`,
-        [...idsLimpios, empresaId],
+         WHERE i.id IN (${placeholders}) AND i.empresa_id = ? AND un.activo = 1 AND prog.unidad_label <> ?`,
+        [...idsLimpios, empresaId, LABEL_CREDITOS],
       );
       if (Number((u as any[])[0]?.total ?? 0) > 0) {
         throw new Error('Hay programas que usan notas: su aprobación se define al registrar las notas, no manualmente.');
@@ -1787,6 +1810,7 @@ export const emisionRepo = {
               CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento, td.codigo AS tipo_doc,
               prog.nombre AS programa_nombre, prog.horas_academicas,
+              tp.nombre AS tipo_programa,
               g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3,
               m.nombre AS modalidad, ec.nombre AS estado,
               e.razon_social AS empresa_nombre, e.logo_url AS empresa_logo
@@ -1796,6 +1820,7 @@ export const emisionRepo = {
        JOIN tipos_documento td ON td.id = p.tipo_documento_id
        JOIN grupos_programas g ON g.id  = i.grupo_id
        JOIN programas prog     ON prog.id = g.programa_id
+       JOIN tipos_programa tp  ON tp.id = prog.tipo_programa_id
        JOIN modalidades m      ON m.id  = g.modalidad_id
        JOIN estado_certificado ec ON ec.id = c.estado_id
        JOIN empresas e         ON e.id  = c.empresa_id
@@ -2017,6 +2042,8 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
           programa_nombre:     ad.programa_nombre,
           nombre_grupo:        ad.nombre_grupo,
           unidad_label:        ad.unidad_label,
+          es_creditos:         ad.es_creditos,
+          total_creditos:      ad.total_creditos,
           nota_minima:         Number(ad.nota_minima),
           fecha_inicio:        fechaInicio,
           fecha_fin:           fechaFin,

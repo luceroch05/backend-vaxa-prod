@@ -16,6 +16,8 @@ import { requireRootTenant } from './middleware/require-root-tenant.middleware';
 import { creditosAdminRoutes } from './modules/admin/creditos.admin.routes';
 import { adminRoutes } from './modules/admin/admin.routes';
 import { cotizacionRoutes } from './modules/cotizaciones/cotizacion.routes';
+import { reclamosPublicRoutes } from './modules/reclamaciones/reclamo.public.routes';
+import { reclamosAdminRoutes } from './modules/reclamaciones/reclamo.admin.routes';
 import { tarifarioRoutes } from './modules/tarifario/tarifario.routes';
 import { authRoutes } from './modules/auth/auth.routes';
 import { backofficeRoutes } from './modules/backoffice/backoffice.routes';
@@ -113,12 +115,16 @@ app.get(`${BASE_PATH}/public/certificado/:tenantSlug/:codigo`, publicLimiter,
   (req, res) => validarPublico(req as any, res).catch((e: unknown) => sendError(res, e, 'public/certificado')),
 );
 
+/** Libro de Reclamaciones Virtual — registro público (sin JWT ni tenant). */
+app.use(`${BASE_PATH}/public/reclamos`, publicLimiter, reclamosPublicRoutes);
+
 /** Certificados: JWT + verificación de que el tenant del token == x-tenant-id */
 app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, certificadosRoutes);
 
 /** Administración Vaxa: JWT + solo tenant raíz (créditos, empresas y usuarios de todas las empresas) */
 app.use(`${BASE_PATH}/api/admin/creditos`,      jwtMiddleware, requireRootTenant, creditosAdminRoutes);
 app.use(`${BASE_PATH}/api/admin/cotizaciones`,  jwtMiddleware, requireRootTenant, cotizacionRoutes);
+app.use(`${BASE_PATH}/api/admin/reclamos`,      jwtMiddleware, requireRootTenant, reclamosAdminRoutes);
 app.use(`${BASE_PATH}/api/admin/tarifario`,     jwtMiddleware, requireRootTenant, tarifarioRoutes);
 app.use(`${BASE_PATH}/api/admin`,               jwtMiddleware, requireRootTenant, adminRoutes);
 

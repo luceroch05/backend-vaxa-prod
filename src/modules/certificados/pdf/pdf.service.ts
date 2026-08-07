@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as QRCode from 'qrcode';
 import { layoutActivo, parseLayout, pintarLienzo } from '../personalizado/lienzo.service';
+import { logoVaxa, LOGO_RATIO } from '../../../shared/marca';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const PDFDocument = require('pdfkit');
 // sharp es OPCIONAL: solo se usa para convertir imágenes webp/gif/avif a PNG,
@@ -57,6 +58,7 @@ export interface PdfActaUnidad {
   nombre: string;
   orden: number;
   nota: number | null;
+  creditos?: number;
 }
 
 export interface PdfActaDatos {
@@ -66,6 +68,9 @@ export interface PdfActaDatos {
   programa_nombre:     string;
   nombre_grupo:        string;
   unidad_label:        string;
+  /** Modo créditos: la tabla muestra créditos por unidad + total, no notas. */
+  es_creditos?:        boolean;
+  total_creditos?:     number;
   nota_minima:         number;
   fecha_inicio?:       string;
   fecha_fin?:          string;
@@ -160,28 +165,46 @@ function imagenABuffer(src: string | null | undefined): ImagenBuffer | null {
   return { data: fs.readFileSync(abs), type: mimeMap[ext] ?? 'image/png' };
 }
 
-function pintarActa(doc: any, datos: PdfActaDatos): void {
+function pintarActa(doc: any, datos: PdfActaDatos, qrDataUrl?: string, codigo?: string): void {
   const left     = doc.page.margins.left;
   const right    = doc.page.width - doc.page.margins.right;
   const contentW = right - left;
   const topY     = doc.page.margins.top;
+  const esCreditos = !!datos.es_creditos;
 
   const fechaIni = fmtFecha(datos.fecha_inicio);
   const fechaFin = fmtFecha(datos.fecha_fin);
 
-  // ── Encabezado ──
-  doc.font('Helvetica-Bold').fontSize(11).fillColor('#1a365d')
-    .text(datos.empresa_nombre.toUpperCase(), left, topY, { width: contentW, align: 'center' });
+  // ── QR de validación (mismo del certificado) en el encabezado, a la derecha ──
+  // Va DENTRO del acta (arriba-derecha), integrado al encabezado. Reservamos ese
+  // ancho para que los datos del alumno no se le encimen.
+  const ACTA_QR   = 66;
+  const qrImg     = qrDataUrl ? imagenABuffer(qrDataUrl) : null;
+  const qrReserve = qrImg ? ACTA_QR + 16 : 0;
+  // El QR va DEBAJO de la línea decorativa (a la altura de los datos del alumno),
+  // no pegado arriba, para que no la cruce.
+  const qrTop     = topY + 46;
+  if (qrImg) {
+    doc.image(qrImg.data, right - ACTA_QR, qrTop, { width: ACTA_QR, height: ACTA_QR });
+    if (codigo) {
+      doc.font('Courier').fontSize(7).fillColor('#94a3b8')
+        .text(codigo, right - ACTA_QR - 6, qrTop + ACTA_QR + 2, { width: ACTA_QR + 12, align: 'center', lineBreak: false });
+    }
+  }
+
+  // ── Encabezado (sin nombre de empresa: ya va en logos/footer) ──
   doc.font('Helvetica-Bold').fontSize(18).fillColor('#0f172a')
-    .text('ACTA DE NOTAS', left, doc.y + 6, { width: contentW, align: 'center' });
+    .text(esCreditos ? 'ACTA DE CRÉDITOS' : 'ACTA DE NOTAS', left, topY + 4, { width: contentW, align: 'center' });
   doc.moveTo(left, doc.y + 8).lineTo(right, doc.y + 8).strokeColor('#cbd5e1').lineWidth(1).stroke();
   doc.moveDown(1.2);
 
   // ── Datos del alumno / programa ──
+  // El ancho del valor deja libre la esquina del QR (a su altura).
   const fila = (label: string, valor: string) => {
     const y = doc.y;
+    const valW = contentW - 135 - (y < qrTop + ACTA_QR ? qrReserve : 0);
     doc.font('Helvetica-Bold').fontSize(10).fillColor('#475569').text(label, left, y, { width: 130 });
-    doc.font('Helvetica').fontSize(10).fillColor('#0f172a').text(valor || '—', left + 135, y, { width: contentW - 135 });
+    doc.font('Helvetica').fontSize(10).fillColor('#0f172a').text(valor || '—', left + 135, y, { width: valW });
     doc.moveDown(0.35);
   };
   fila('Participante:', datos.participante_nombre);
@@ -191,18 +214,19 @@ function pintarActa(doc: any, datos: PdfActaDatos): void {
   if (fechaIni || fechaFin) fila('Periodo:', `${fechaIni}${fechaIni && fechaFin ? ' al ' : ''}${fechaFin}`);
   doc.moveDown(0.8);
 
-  // ── Tabla de notas ──
+  // ── Tabla ──
   const colNum    = 40;
-  const colNota   = 110;
-  const colUnidad = contentW - colNum - colNota;
+  const colValor  = 110;   // NOTA o CRÉDITOS
+  const colUnidad = contentW - colNum - colValor;
   const rowH = 24;
   let y = doc.y;
 
   doc.rect(left, y, contentW, rowH).fill('#0f172a');
   doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(9.5);
-  doc.text('N°',                              left + 6,                y + 7, { width: colNum - 6 });
-  doc.text(datos.unidad_label.toUpperCase(),  left + colNum + 6,       y + 7, { width: colUnidad - 12 });
-  doc.text('NOTA',                            left + colNum + colUnidad, y + 7, { width: colNota, align: 'center' });
+  const colNombreHdr = esCreditos ? 'TEMA' : datos.unidad_label.toUpperCase();
+  doc.text('N°',                              left + 6,                  y + 7, { width: colNum - 6 });
+  doc.text(colNombreHdr,                       left + colNum + 6,         y + 7, { width: colUnidad - 12 });
+  doc.text(esCreditos ? 'CRÉDITOS' : 'NOTA',   left + colNum + colUnidad, y + 7, { width: colValor, align: 'center' });
   y += rowH;
 
   const unidadesOrden = [...datos.unidades].sort((a, b) => a.orden - b.orden);
@@ -211,9 +235,11 @@ function pintarActa(doc: any, datos: PdfActaDatos): void {
     if (i % 2 === 0) doc.rect(left, y, contentW, rowH).fill('#f8fafc');
     doc.fillColor('#334155').text(String(i + 1), left + 6, y + 7, { width: colNum - 6 });
     doc.fillColor('#0f172a').text(u.nombre, left + colNum + 6, y + 7, { width: colUnidad - 12 });
-    const notaTxt = u.nota == null ? '—' : u.nota.toFixed(2);
+    const valorTxt = esCreditos
+      ? String(Number(u.creditos ?? 0))
+      : (u.nota == null ? '—' : u.nota.toFixed(2));
     doc.font('Helvetica-Bold').fillColor('#0f172a')
-      .text(notaTxt, left + colNum + colUnidad, y + 7, { width: colNota, align: 'center' });
+      .text(valorTxt, left + colNum + colUnidad, y + 7, { width: colValor, align: 'center' });
     doc.font('Helvetica');
     y += rowH;
   });
@@ -221,23 +247,38 @@ function pintarActa(doc: any, datos: PdfActaDatos): void {
 
   // ── Resumen final ──
   y += 18;
-  const promedioTxt = datos.promedio == null ? '—' : datos.promedio.toFixed(2);
-  const condicion   = !datos.completo ? 'PENDIENTE (faltan notas)' : datos.aprobado ? 'APROBADO' : 'DESAPROBADO';
-  const condColor   = !datos.completo ? '#92400e' : datos.aprobado ? '#15803d' : '#b91c1c';
+  if (esCreditos) {
+    // Modo créditos: total de créditos + condición por asistencia (aprobado = 3).
+    const totalCred = datos.total_creditos ?? unidadesOrden.reduce((s, u) => s + Number(u.creditos ?? 0), 0);
+    const condicion = datos.aprobado ? 'APROBADO' : 'PENDIENTE';
+    const condColor = datos.aprobado ? '#15803d' : '#92400e';
+    doc.font('Helvetica-Bold').fontSize(12).fillColor('#475569')
+      .text('Total de créditos: ', left, y, { continued: true })
+      .fillColor('#0f172a').text(String(Number(totalCred)));
+    doc.font('Helvetica').fontSize(9.5).fillColor('#94a3b8')
+      .text('Los créditos se otorgan por asistencia al programa.', left, doc.y + 2);
+    doc.moveDown(0.6);
+    doc.font('Helvetica-Bold').fontSize(13).fillColor(condColor)
+      .text(`Condición: ${condicion}`, left, doc.y);
+  } else {
+    const promedioTxt = datos.promedio == null ? '—' : datos.promedio.toFixed(2);
+    const condicion   = !datos.completo ? 'PENDIENTE (faltan notas)' : datos.aprobado ? 'APROBADO' : 'DESAPROBADO';
+    const condColor   = !datos.completo ? '#92400e' : datos.aprobado ? '#15803d' : '#b91c1c';
 
-  doc.font('Helvetica-Bold').fontSize(11).fillColor('#475569')
-    .text('Promedio final: ', left, y, { continued: true })
-    .fillColor('#0f172a').text(promedioTxt);
-  doc.font('Helvetica').fontSize(9.5).fillColor('#94a3b8')
-    .text(`(Nota mínima de aprobación: ${datos.nota_minima.toFixed(2)} · escala 0–20)`, left, doc.y + 2);
-  doc.moveDown(0.6);
-  doc.font('Helvetica-Bold').fontSize(13).fillColor(condColor)
-    .text(`Condición: ${condicion}`, left, doc.y);
+    doc.font('Helvetica-Bold').fontSize(11).fillColor('#475569')
+      .text('Promedio final: ', left, y, { continued: true })
+      .fillColor('#0f172a').text(promedioTxt);
+    doc.font('Helvetica').fontSize(9.5).fillColor('#94a3b8')
+      .text(`(Nota mínima de aprobación: ${datos.nota_minima.toFixed(2)} · escala 0–20)`, left, doc.y + 2);
+    doc.moveDown(0.6);
+    doc.font('Helvetica-Bold').fontSize(13).fillColor(condColor)
+      .text(`Condición: ${condicion}`, left, doc.y);
+  }
 
   // ── Footer ──
   const footerY = doc.page.height - doc.page.margins.bottom - 24;
   doc.font('Helvetica').fontSize(8).fillColor('#9ca3af')
-    .text(`Documento generado por ${datos.empresa_nombre} — Acta de notas`,
+    .text(esCreditos ? 'Acta de créditos' : 'Acta de notas',
       left, footerY, { width: contentW, align: 'center', lineBreak: false });
 }
 
@@ -295,8 +336,29 @@ async function asegurarImagenesPdf(datos: PdfDatos): Promise<void> {
   for (const f of datos.firmas) f.imagen = (await aFormatoPdf(f.imagen)) ?? f.imagen;
 }
 
-async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrDataUrl: string; vars: Record<string, string> }> {
+/**
+ * Logo de Vaxa TRANSPARENTE para el pie del certificado. Lee el archivo LOCAL
+ * `uploads/marca/vaxa-cert.png` (fondo transparente) — NO la versión de
+ * comprobantes (que tiene fondo blanco). Cacheado en memoria.
+ */
+let _vaxaCertLogo: Buffer | null | undefined;
+function logoVaxaCertLocal(): Buffer | null {
+  if (_vaxaCertLogo !== undefined) return _vaxaCertLogo;
+  const candidatos = [
+    path.join(process.cwd(), 'uploads', 'marca', 'vaxa-cert.png'),
+    path.join(__dirname, '..', '..', '..', '..', 'uploads', 'marca', 'vaxa-cert.png'),
+  ];
+  for (const p of candidatos) {
+    try { if (fs.existsSync(p)) { _vaxaCertLogo = fs.readFileSync(p); return _vaxaCertLogo; } } catch { /* siguiente */ }
+  }
+  _vaxaCertLogo = null;
+  return _vaxaCertLogo;
+}
+
+async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrDataUrl: string; vars: Record<string, string>; vaxaLogo: Buffer | null }> {
   await asegurarImagenesPdf(datos);   // webp/gif → png (PDFKit solo acepta png/jpeg)
+  // Pie del certificado: logo transparente local; si no está, cae al de comprobantes.
+  const vaxaLogo = logoVaxaCertLocal() ?? await logoVaxa();
   const qrUrl    = buildValidarUrl(datos.empresa_nombre, datos.codigo_unico);
   const qrDataUrl = await QRCode.toDataURL(qrUrl, { errorCorrectionLevel: 'M', width: 200, margin: 1 });
 
@@ -337,17 +399,40 @@ async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrD
   // {cuerpo} disponible como variable de los campos del lienzo (ya expandido).
   vars.cuerpo = cuerpo;
 
-  return { cuerpo, qrDataUrl, vars };
+  return { cuerpo, qrDataUrl, vars, vaxaLogo };
+}
+
+/** Pie fijo de Vaxa: "Fecha de emisión" a la izquierda + "Certificado emitido por"
+ *  con el logo de Vaxa, centrado. Se dibuja en TODOS los certificados (diseño por
+ *  defecto Y personalizado/Lienzo). */
+function pintarFooterVaxa(doc: any, datos: PdfDatos, vaxaLogo?: Buffer | null): void {
+  doc.font('Helvetica').fontSize(8).fillColor('#9ca3af')
+    .text(`Fecha de emisión: ${fmtFecha(datos.fecha_emision)}`, 30, H - 18, { lineBreak: false });
+  const attr   = 'Certificado emitido por';
+  doc.font('Helvetica').fontSize(8).fillColor('#9ca3af');
+  const attrW  = doc.widthOfString(attr);
+  const vlogoH = 13;
+  const vlogoW = vaxaLogo ? Math.round(vlogoH * LOGO_RATIO) : 0;
+  const gap    = vaxaLogo ? 5 : 0;
+  const startX = (W - (attrW + gap + vlogoW)) / 2;
+  doc.text(attr, startX, H - 18, { lineBreak: false });
+  if (vaxaLogo) {
+    try { doc.image(vaxaLogo, startX + attrW + gap, H - 23, { width: vlogoW, height: vlogoH }); }
+    catch (e) { console.warn('Error logo Vaxa footer:', (e as Error).message); }
+  }
 }
 
 /* ── Dibujo del certificado (idéntico para PDF en disco y preview en memoria) ─ */
 function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl: string, vars: Record<string, string>): void {
+  // Si hay acta (2ª hoja), el QR va SOLO en el acta, no en el certificado.
+  const tieneActa = !!(datos.acta && datos.acta.unidades.length > 0);
   // Modo "Diseño Personalizado (Lienzo)": si la empresa tiene un diseño a medida
   // activo, se delega en el módulo aislado (personalizado/) y se omite TODO el
   // layout por defecto de abajo. El motor normal queda intacto.
   const layout = parseLayout(datos.layout_personalizado);
   if (layout && layoutActivo(datos.layout_personalizado)) {
-    pintarLienzo(doc, datos, qrDataUrl, vars, layout, { W, H, PX, imagenABuffer });
+    // Si hay acta, el QR va solo en el acta: pasamos '' para que el lienzo no lo dibuje.
+    pintarLienzo(doc, datos, tieneActa ? '' : qrDataUrl, vars, layout, { W, H, PX, imagenABuffer });
   } else {
         // ── FONDO ────────────────────────────────────────────
         const fondo = imagenABuffer(datos.plantilla_url);
@@ -454,17 +539,21 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
           });
 
         // ── QR ───────────────────────────────────────────────
-        const QR_SIZE = 75;
-        const qrX     = W - 70 * PX - QR_SIZE;
-        const qrY     = H - 40 * PX - QR_SIZE;
-        const qrImg   = imagenABuffer(qrDataUrl);
-        if (qrImg) {
-          doc.image(qrImg.data, qrX, qrY, { width: QR_SIZE, height: QR_SIZE });
+        // Si el PDF lleva acta (2ª hoja), el QR Y el código en texto van SOLO en
+        // el acta; el certificado queda sin ninguno de los dos.
+        if (!tieneActa) {
+          const QR_SIZE = 75;
+          const qrX     = W - 70 * PX - QR_SIZE;
+          const qrY     = H - 40 * PX - QR_SIZE;
+          const qrImg   = imagenABuffer(qrDataUrl);
+          if (qrImg) {
+            doc.image(qrImg.data, qrX, qrY, { width: QR_SIZE, height: QR_SIZE });
+          }
+          doc.font('Courier').fontSize(7).fillColor('#94a3b8')
+            .text(datos.codigo_unico, qrX - 5, qrY + QR_SIZE + 4, {
+              width: QR_SIZE + 10, align: 'center',
+            });
         }
-        doc.font('Courier').fontSize(7).fillColor('#94a3b8')
-          .text(datos.codigo_unico, qrX - 5, qrY + QR_SIZE + 4, {
-            width: QR_SIZE + 10, align: 'center',
-          });
 
         // ── FIRMAS ───────────────────────────────────────────
         // Máximo 3 firmas en el certificado (igual que los logos).
@@ -499,22 +588,14 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
           }
         }
 
-        // ── FOOTER ───────────────────────────────────────────
-        doc.font('Helvetica').fontSize(8).fillColor('#9ca3af')
-          .text(`Fecha de emisión: ${fmtFecha(datos.fecha_emision)}`, 30, H - 18, { lineBreak: false });
-        // Atribución fija a Vaxa: en TODOS los certificados, de cualquier empresa,
-        // se indica que el certificado fue generado por Vaxa.
-        doc.font('Helvetica').fontSize(8).fillColor('#9ca3af')
-          .text('Certificado generado por Vaxa — Sistema de Certificación',
-            0, H - 18, { width: W, align: 'center', lineBreak: false });
-
   } // ── fin del diseño por defecto ──
+        // El footer de Vaxa se dibuja al final sobre TODAS las páginas (ver generar/generarBuffer).
 
         // ── PÁGINA 2: ACTA DE NOTAS ───────────────────────────
         // Común a ambos modos: el acta de notas no depende del diseño del certificado.
         if (datos.acta && datos.acta.unidades.length > 0) {
           doc.addPage({ size: 'A4', layout: 'landscape', margin: 50 });
-          pintarActa(doc, datos.acta);
+          pintarActa(doc, datos.acta, qrDataUrl, datos.codigo_unico);
         }
 }
 
@@ -541,17 +622,23 @@ export const pdfService = {
 
     const filename   = `${datos.codigo_unico}.pdf`;
     const outputPath = path.join(outputDir, filename);
-    const { cuerpo, qrDataUrl, vars } = await prepararContenido(datos);
+    const { cuerpo, qrDataUrl, vars, vaxaLogo } = await prepararContenido(datos);
 
     return new Promise<string>((resolve, reject) => {
       try {
         const doc = new PDFDocument({
-          size: 'A4', layout: 'landscape', margin: 0,
+          size: 'A4', layout: 'landscape', margin: 0, bufferPages: true,
           info: { Title: `Certificado ${datos.codigo_unico}`, Author: datos.empresa_nombre },
         });
         const stream = fs.createWriteStream(outputPath);
         doc.pipe(stream);
         pintarCertificado(doc, datos, cuerpo, qrDataUrl, vars);
+        // Footer de Vaxa en TODAS las páginas (certificado + acta).
+        const range = doc.bufferedPageRange();
+        for (let i = range.start; i < range.start + range.count; i++) {
+          doc.switchToPage(i);
+          pintarFooterVaxa(doc, datos, vaxaLogo);
+        }
         doc.end();
         stream.on('finish', () => {
           const rel = path.relative(process.cwd(), outputPath).replace(/\\/g, '/');
@@ -565,7 +652,7 @@ export const pdfService = {
   /** Genera el PDF en memoria (sin escribir en disco). Lo usa la previsualización:
    *  mismo motor y mismo dibujo que `generar`, así el preview es idéntico al PDF real. */
   async generarBuffer(datos: PdfDatos): Promise<Buffer> {
-    const { cuerpo, qrDataUrl, vars } = await prepararContenido(datos);
+    const { cuerpo, qrDataUrl, vars, vaxaLogo } = await prepararContenido(datos);
 
     return new Promise<Buffer>((resolve, reject) => {
       try {
@@ -578,11 +665,12 @@ export const pdfService = {
         doc.on('end', () => resolve(Buffer.concat(chunks)));
         doc.on('error', reject);
         pintarCertificado(doc, datos, cuerpo, qrDataUrl, vars);
-        // Marca de agua en TODAS las páginas (certificado + acta) para que el
-        // preview no pueda usarse como documento real sin emitir.
+        // Footer de Vaxa + marca de agua en TODAS las páginas (certificado + acta).
+        // El footer va en todas; la marca de agua hace inservible el preview.
         const range = doc.bufferedPageRange();
         for (let i = range.start; i < range.start + range.count; i++) {
           doc.switchToPage(i);
+          pintarFooterVaxa(doc, datos, vaxaLogo);
           pintarMarcaAgua(doc);
         }
         doc.end();

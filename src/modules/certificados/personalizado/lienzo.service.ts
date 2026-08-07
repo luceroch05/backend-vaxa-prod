@@ -291,7 +291,9 @@ export function pintarLienzo(
         try { doc.image(qrImg.data, qx, qy, { width: size, height: size }); }
         catch (e) { console.warn('[lienzo] Error QR:', (e as Error).message); }
       }
-      if (c.showCodigo !== false && datos.codigo_unico) {
+      // Si no hay QR (qrDataUrl vacío porque el QR va al acta), tampoco se
+      // dibuja el código en texto: ambos van solo en el acta.
+      if (qrImg && c.showCodigo !== false && datos.codigo_unico) {
         doc.font('Courier').fontSize(7).fillColor('#94a3b8')
           .text(datos.codigo_unico, qx - 5, qy + size + 4, { width: size + 10, align: 'center' });
       }

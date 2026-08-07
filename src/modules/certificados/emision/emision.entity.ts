@@ -32,6 +32,7 @@ export class CertificadoPublicoEntity {
   numero_documento!: string;
   tipo_doc!: string;
   programa_nombre!: string;
+  tipo_programa!: string;
   horas_academicas!: number;
   nombre_grupo!: string;
   fecha_inicio!: string;

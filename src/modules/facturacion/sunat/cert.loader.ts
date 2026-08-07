@@ -6,8 +6,9 @@
  * su ruta y contraseña vienen del .env.
  */
 import { readFileSync } from 'fs';
-import forge from 'node-forge';
+import type * as ForgeNS from 'node-forge';
 
+// node-forge se carga PEREZOSAMENTE (solo al abrir el .pfx), no al arrancar el API.
 export interface CertificadoPem {
   privateKeyPem: string;   // llave privada (firma)
   certificatePem: string;  // certificado público (va dentro de la firma)
@@ -18,6 +19,7 @@ export interface CertificadoPem {
 
 /** Abre el .pfx en `path` con `password` y devuelve la llave + el certificado en PEM. */
 export function cargarCertificado(path: string, password: string): CertificadoPem {
+  const forge = require('node-forge') as typeof import('node-forge');
   let der: string;
   try {
     der = readFileSync(path, 'binary');
@@ -25,7 +27,7 @@ export function cargarCertificado(path: string, password: string): CertificadoPe
     throw new Error(`No se pudo leer el certificado en "${path}". Verifica SUNAT_CERT_PATH.`);
   }
 
-  let p12: forge.pkcs12.Pkcs12Pfx;
+  let p12: ForgeNS.pkcs12.Pkcs12Pfx;
   try {
     const asn1 = forge.asn1.fromDer(der);
     p12 = forge.pkcs12.pkcs12FromAsn1(asn1, false, password);
@@ -53,7 +55,7 @@ export function cargarCertificado(path: string, password: string): CertificadoPe
   const cn = cert.subject.getField('CN');
 
   return {
-    privateKeyPem:  forge.pki.privateKeyToPem(key as forge.pki.PrivateKey),
+    privateKeyPem:  forge.pki.privateKeyToPem(key as ForgeNS.pki.PrivateKey),
     certificatePem: forge.pki.certificateToPem(cert),
     subject:        cn?.value ?? '(sin CN)',
     notBefore:      cert.validity.notBefore,
