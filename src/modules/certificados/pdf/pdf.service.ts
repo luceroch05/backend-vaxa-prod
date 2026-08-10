@@ -230,18 +230,25 @@ function pintarActa(doc: any, datos: PdfActaDatos, qrDataUrl?: string, codigo?: 
   y += rowH;
 
   const unidadesOrden = [...datos.unidades].sort((a, b) => a.orden - b.orden);
-  doc.font('Helvetica').fontSize(10);
+  const padY = 7;   // relleno arriba/abajo del texto dentro de la fila
   unidadesOrden.forEach((u, i) => {
-    if (i % 2 === 0) doc.rect(left, y, contentW, rowH).fill('#f8fafc');
-    doc.fillColor('#334155').text(String(i + 1), left + 6, y + 7, { width: colNum - 6 });
-    doc.fillColor('#0f172a').text(u.nombre, left + colNum + 6, y + 7, { width: colUnidad - 12 });
+    // La fila se ADAPTA: si el nombre del tema es largo, se parte en varias líneas y
+    // la altura de la fila crece para que no se encime con la siguiente.
+    doc.font('Helvetica').fontSize(10);
+    const nombre = u.nombre ?? '';
+    const nombreH = doc.heightOfString(nombre, { width: colUnidad - 12 });
+    const rowHi = Math.max(rowH, nombreH + padY * 2);
+    if (i % 2 === 0) doc.rect(left, y, contentW, rowHi).fill('#f8fafc');
+    doc.fillColor('#334155').font('Helvetica').fontSize(10)
+      .text(String(i + 1), left + 6, y + padY, { width: colNum - 6 });
+    doc.fillColor('#0f172a').text(nombre, left + colNum + 6, y + padY, { width: colUnidad - 12 });
     const valorTxt = esCreditos
       ? String(Number(u.creditos ?? 0))
       : (u.nota == null ? '—' : u.nota.toFixed(2));
     doc.font('Helvetica-Bold').fillColor('#0f172a')
-      .text(valorTxt, left + colNum + colUnidad, y + 7, { width: colValor, align: 'center' });
+      .text(valorTxt, left + colNum + colUnidad, y + padY, { width: colValor, align: 'center' });
     doc.font('Helvetica');
-    y += rowH;
+    y += rowHi;
   });
   doc.moveTo(left, y).lineTo(right, y).strokeColor('#e2e8f0').lineWidth(1).stroke();
 

@@ -6,9 +6,9 @@ import { listProgramas, getPrograma, createPrograma, updatePrograma, setActivoPr
 import { listGrupos, getGrupo, createGrupo, updateGrupo, setActivoGrupo, eliminarGrupo } from './grupos/grupo.controller';
 import { listParticipantes, getParticipante, createParticipante, buscarParticipante, setActivoParticipante, eliminarParticipante, actualizarParticipante } from './participantes/participante.controller';
 import { listInscripciones, createInscripcion, cambiarEstado, cambiarEstadoMasivo, eliminarInscripcion, inscribir, importarMasivo } from './inscripciones/inscripcion.controller';
-import { listLogos, createLogo, deleteLogo }                         from './logos/logo.controller';
-import { listFirmas, createFirma, deleteFirma }                      from './firmas/firma.controller';
-import { getConfig, upsertConfig, listGruposConConfig, congelarGrupo, eliminarConfigGrupo } from './config/config.controller';
+import { listLogos, createLogo, updateLogo, deleteLogo }             from './logos/logo.controller';
+import { listFirmas, createFirma, updateFirma, deleteFirma }         from './firmas/firma.controller';
+import { getConfig, upsertConfig, listGruposConConfig, congelarGrupo, eliminarConfigGrupo, getLayoutBase, saveLayoutBase } from './config/config.controller';
 import { listCertificados, generarCertificado, generarLote, anularCertificado, eliminarCertificado, regenerarPDF, previewCertificado,descargarZipGrupo, descargarZipPorIds, } from './emision/emision.controller';
 import { listUnidades, createUnidad, updateUnidad, deleteUnidad } from './unidades/unidad.controller';
 import { getNotasGrupo, guardarNotas } from './notas/nota.controller';
@@ -57,17 +57,23 @@ router.patch('/inscripciones/estado-masivo',    w(cambiarEstadoMasivo));      //
 router.patch('/inscripciones/:id/estado',       w(cambiarEstado));
 router.delete('/inscripciones/:id',   soloAdmin, w(eliminarInscripcion));    // borrar inscripción (con protección)
 
-// Logos (admision SÍ puede crear y eliminar logos)
+// Logos (admision SÍ puede crear, editar y eliminar logos)
 router.get('/logos',                            w(listLogos));
 router.post('/logos',                           w(createLogo));
+router.put('/logos/:id',                        w(updateLogo));
 router.delete('/logos/:id',                     w(deleteLogo));
 
-// Firmas (admision SÍ puede crear y eliminar firmas)
+// Firmas (admision SÍ puede crear, editar y eliminar firmas)
 router.get('/firmas',                           w(listFirmas));
 router.post('/firmas',                          w(createFirma));
+router.put('/firmas/:id',                       w(updateFirma));
 router.delete('/firmas/:id',                    w(deleteFirma));
 
 // Config / diseño del certificado (admision SÍ puede configurar plantilla/logos/firmas)
+// Plantilla base del diseño personalizado (por empresa). Va ANTES de /config/:programaId
+// para que "config-base" no colisione con el patrón con parámetro.
+router.get('/config-base',                                 w(getLayoutBase));           // plantilla base de la empresa
+router.put('/config-base',                                 w(saveLayoutBase));          // guarda la plantilla base
 router.get('/config/:programaId',                          w(getConfig));               // ?grupo_id=N (opcional)
 router.put('/config/:programaId',                          w(upsertConfig));            // body.grupo_id (opcional, default 0)
 router.get('/config/:programaId/grupos',                   w(listGruposConConfig));     // lista grupos con config propia
@@ -90,8 +96,8 @@ router.get('/emision',                          w(listCertificados));
 router.get('/emision/preview/:inscripcionId',   w(previewCertificado));      // vista previa PDF (no emite)
 router.post('/emision/generar/:inscripcionId',  w(generarCertificado));
 router.post('/emision/lote',                    w(generarLote));             // emite varias → UN solo movimiento de crédito
-router.patch('/emision/:id/anular',   soloAdmin, w(anularCertificado));      // solo administrador
-router.delete('/emision/:id',         soloAdmin, w(eliminarCertificado));    // elimina y DEVUELVE crédito (solo admin)
+router.patch('/emision/:id/anular',              w(anularCertificado));      // ADMISION y ADMINISTRADOR pueden anular
+router.delete('/emision/:id',                    w(eliminarCertificado));    // ADMINISTRADOR sin límite; ADMISION solo ≤24h (candado en el controller)
 router.post('/emision/:id/regenerar-pdf',       w(regenerarPDF));
 router.get('/emision/grupo/:grupoId/zip',w(descargarZipGrupo),
 );

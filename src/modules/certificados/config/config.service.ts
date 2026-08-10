@@ -16,4 +16,9 @@ export const configService = {
 
   eliminarConfigGrupo: (tenantSlug: string, programaId: number, grupoId: number, uid?: number) =>
                           configRepo.eliminarConfigGrupo(tenantSlug, programaId, grupoId, uid),
+
+  /** Plantilla base del diseño personalizado (por empresa). */
+  getLayoutBase:       (tenantSlug: string) => configRepo.getLayoutBase(tenantSlug),
+  saveLayoutBase:      (tenantSlug: string, layoutJson: string | null, uid?: number) =>
+                          configRepo.saveLayoutBase(tenantSlug, layoutJson, uid),
 };

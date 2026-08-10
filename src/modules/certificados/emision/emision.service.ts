@@ -6,7 +6,7 @@ export const emisionService = {
   generarLote:   (tenantSlug: string, ids: number[], uid?: number)         => emisionRepo.generarLote(tenantSlug, ids, uid),
   validarPublico:(codigoUnico: string, tenantSlug: string)                 => emisionRepo.validarPublico(codigoUnico, tenantSlug),
   anular:        (tenantSlug: string, id: number, uid?: number)            => emisionRepo.anular(tenantSlug, id, uid),
-  eliminar:      (tenantSlug: string, id: number, uid?: number)            => emisionRepo.eliminar(tenantSlug, id, uid),
+  eliminar:      (tenantSlug: string, id: number, uid?: number, bypassLock = false) => emisionRepo.eliminar(tenantSlug, id, uid, bypassLock),
   regenerarPDF:  (tenantSlug: string, id: number)                          => emisionRepo.regenerarPDF(tenantSlug, id),
   preview:       (tenantSlug: string, inscripcionId: number)               => emisionRepo.previewBuffer(tenantSlug, inscripcionId),
   zipGrupo: (tenantSlug: string, grupoId: number) =>emisionRepo.zipGrupo(tenantSlug, grupoId),

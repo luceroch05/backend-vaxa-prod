@@ -2,6 +2,11 @@ import type { Request, Response } from 'express';
 import { emisionService } from './emision.service';
 import { tid } from '../shared/router.helper';
 import { SinCreditosError } from '../shared/creditos.repository';
+import { CertBloqueadoError } from './emision.errors';
+
+/** ¿El usuario autenticado es ADMINISTRADOR de la empresa? (los ADMISION tienen el candado de 24h). */
+const esAdministrador = (req: Request): boolean =>
+  String((req as any).authUser?.rol ?? '').toUpperCase() === 'ADMINISTRADOR';
 import { getEmpresaId, estaVencidaPorPago, MSG_VENCIDA } from '../shared/db.helper';
 
 /** Id del usuario autenticado (lo pone jwtMiddleware en authUser.sub). */
@@ -73,9 +78,18 @@ export async function anularCertificado(req: Request, res: Response): Promise<vo
 }
 
 export async function eliminarCertificado(req: Request, res: Response): Promise<void> {
-  const ok = await emisionService.eliminar(tid(req), Number(req.params.id), uid(req));
-  if (!ok) { res.status(404).json({ error: 'Certificado no encontrado' }); return; }
-  res.status(204).send();
+  // El ADMINISTRADOR de la empresa elimina sin límite; el ADMISION solo dentro de las 24h.
+  try {
+    const ok = await emisionService.eliminar(tid(req), Number(req.params.id), uid(req), esAdministrador(req));
+    if (!ok) { res.status(404).json({ error: 'Certificado no encontrado' }); return; }
+    res.status(204).send();
+  } catch (e) {
+    if (e instanceof CertBloqueadoError) {
+      res.status(403).json({ error: e.message, code: 'CERT_BLOQUEADO' });
+      return;
+    }
+    throw e;
+  }
 }
 
 export async function regenerarPDF(req: Request, res: Response): Promise<void> {

@@ -17,14 +17,15 @@ import { LogoEntity }          from '../logos/logo.entity';
 import { FirmaEntity }         from '../firmas/firma.entity';
 import { ConfigCertificadoEntity } from '../config/config.entity';
 import { CertificadoEntity, CertificadoPublicoEntity } from '../emision/emision.entity';
+import { CertBloqueadoError, HORAS_BLOQUEO_CERT } from '../emision/emision.errors';
 import { UnidadEntity } from '../unidades/unidad.entity';
 
 import type { CreateProgramaDto, UpdateProgramaDto }   from '../programas/programa.dto';
 import type { CreateGrupoDto }                         from '../grupos/grupo.dto';
 import type { CreateParticipanteDto }                  from '../participantes/participante.dto';
 import type { CreateInscripcionDto, InscribirDto }      from '../inscripciones/inscripcion.dto';
-import type { CreateLogoDto }                          from '../logos/logo.dto';
-import type { CreateFirmaDto }                         from '../firmas/firma.dto';
+import type { CreateLogoDto, UpdateLogoDto }           from '../logos/logo.dto';
+import type { CreateFirmaDto, UpdateFirmaDto }         from '../firmas/firma.dto';
 import type { UpsertConfigDto }                        from '../config/config.dto';
 import type { CreateUnidadDto, UpdateUnidadDto }        from '../unidades/unidad.dto';
 import type { NotaInput }                               from '../notas/nota.dto';
@@ -51,6 +52,27 @@ async function ensureLayoutPersonalizado(): Promise<void> {
     );
   }
   _ensuredLayout = true;
+}
+
+/**
+ * Auto-sana la columna `empresas.layout_base` (plantilla base del "Diseño
+ * personalizado / Lienzo"). Cada empresa guarda AQUÍ, una sola vez, la posición
+ * por defecto de sus elementos; al activar el diseño en un programa nuevo se carga
+ * esta base (ya no un preset hardcodeado por el programador). Se crea sola si la
+ * migración no corrió en prod.
+ */
+let _ensuredLayoutBase = false;
+async function ensureLayoutBase(): Promise<void> {
+  if (_ensuredLayoutBase) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'empresas'
+        AND COLUMN_NAME = 'layout_base' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query(`ALTER TABLE empresas ADD COLUMN layout_base TEXT NULL`);
+  }
+  _ensuredLayoutBase = true;
 }
 import archiver = require('archiver');
 import { PassThrough } from 'stream';
@@ -1289,6 +1311,30 @@ export const logosRepo = {
     return logo;
   },
 
+  /** Edita nombre y/o imagen de un logo. El logo obligatorio (es_default) no se edita
+   *  aquí: su imagen se sincroniza desde el perfil de la empresa. */
+  async update(tenantSlug: string, id: number, dto: UpdateLogoDto, userId?: number): Promise<LogoEntity | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      'SELECT * FROM logos WHERE id = ? AND empresa_id = ? AND activo = 1', [id, empresaId],
+    );
+    const actual = (rows as any[])[0];
+    if (!actual) return null;
+    if (actual.es_default) {
+      throw new Error('LOGO_DEFAULT: El logo de la empresa se cambia desde el perfil de la empresa, no aquí.');
+    }
+    const nombre = dto.nombre !== undefined ? (dto.nombre?.trim() || null) : actual.nombre;
+    const imagen = dto.imagen_logo ? guardarImagen(dto.imagen_logo, 'logos') : actual.imagen_logo;
+    await pool().query('UPDATE logos SET nombre = ?, imagen_logo = ? WHERE id = ? AND empresa_id = ?',
+      [nombre, imagen, id, empresaId]);
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'logo', entidadId: id, entidadNombre: nombre,
+      descripcion: `Editó el logo${nombre ? ` "${nombre}"` : ''}${dto.imagen_logo ? ' (nueva imagen)' : ''}`,
+    });
+    const [r2] = await pool().query<any[]>('SELECT * FROM logos WHERE id = ?', [id]);
+    return LogoEntity.fromRow((r2 as any[])[0]);
+  },
+
   async remove(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
     // El logo default es obligatorio: no se puede eliminar.
@@ -1334,6 +1380,27 @@ export const firmasRepo = {
       descripcion: `Agregó la firma de ${firma.nombre_autoridad}${firma.cargo ? ` (${firma.cargo})` : ''}`,
     });
     return firma;
+  },
+
+  /** Edita nombre, cargo y/o imagen de una firma. Si no viene imagen, se conserva la actual. */
+  async update(tenantSlug: string, id: number, dto: UpdateFirmaDto, userId?: number): Promise<FirmaEntity | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      'SELECT * FROM firmas WHERE id = ? AND empresa_id = ? AND activo = 1', [id, empresaId],
+    );
+    const actual = (rows as any[])[0];
+    if (!actual) return null;
+    const nombre = dto.nombre_autoridad !== undefined ? (dto.nombre_autoridad?.trim() || actual.nombre_autoridad) : actual.nombre_autoridad;
+    const cargo  = dto.cargo !== undefined ? (dto.cargo?.trim() || actual.cargo) : actual.cargo;
+    const imagen = dto.imagen_firma ? guardarImagen(dto.imagen_firma, 'firmas') : actual.imagen_firma;
+    await pool().query('UPDATE firmas SET nombre_autoridad = ?, cargo = ?, imagen_firma = ? WHERE id = ? AND empresa_id = ?',
+      [nombre, cargo, imagen, id, empresaId]);
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'firma', entidadId: id, entidadNombre: nombre,
+      descripcion: `Editó la firma de ${nombre}${dto.imagen_firma ? ' (nueva imagen)' : ''}`,
+    });
+    const [r2] = await pool().query<any[]>('SELECT * FROM firmas WHERE id = ?', [id]);
+    return FirmaEntity.fromRow((r2 as any[])[0]);
   },
 
   async remove(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
@@ -1510,6 +1577,29 @@ export const configRepo = {
       descripcion: `Quitó el diseño específico del aula "${aula ?? grupoId}" del programa "${programa ?? programaId}" (vuelve a heredar del programa)`,
     });
     return true;
+  },
+
+  /** Plantilla base del diseño personalizado de la empresa (JSON del layout) o null. */
+  async getLayoutBase(tenantSlug: string): Promise<string | null> {
+    await ensureLayoutBase();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT layout_base FROM empresas WHERE id = ? LIMIT 1`, [empresaId],
+    );
+    return (rows as any[])[0]?.layout_base ?? null;
+  },
+
+  /** Guarda (o limpia con null) la plantilla base de diseño de la empresa. */
+  async saveLayoutBase(tenantSlug: string, layoutJson: string | null, userId?: number): Promise<void> {
+    await ensureLayoutBase();
+    const empresaId = await getEmpresaId(tenantSlug);
+    await pool().query(`UPDATE empresas SET layout_base = ? WHERE id = ?`, [layoutJson ?? null, empresaId]);
+    auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'config', entidadId: empresaId, entidadNombre: null,
+      descripcion: layoutJson
+        ? 'Guardó la plantilla base del diseño personalizado del certificado'
+        : 'Borró la plantilla base del diseño personalizado del certificado',
+    });
   },
 };
 
@@ -1863,9 +1953,22 @@ export const emisionRepo = {
   /**
    * Elimina el certificado por completo y DEVUELVE 1 al cupo del mes.
    * (Anular solo desactiva; eliminar libera el cupo). Borra también el PDF físico.
+   *
+   * BLOQUEO 24h: pasadas `HORAS_BLOQUEO_CERT` horas desde la emisión, la empresa ya
+   * NO puede eliminarlo (lanza CertBloqueadoError → 403). `bypassLock` lo salta y
+   * queda reservado para un administrador de Vaxa (panel del proveedor).
    */
-  async eliminar(tenantSlug: string, id: number, userId?: number): Promise<boolean> {
+  async eliminar(tenantSlug: string, id: number, userId?: number, bypassLock = false): Promise<boolean> {
     const empresaId = await getEmpresaId(tenantSlug);
+    // Candado por antigüedad (se calcula en SQL para no depender de la zona horaria del proceso).
+    if (!bypassLock) {
+      const [chk] = await pool().query<any[]>(
+        'SELECT TIMESTAMPDIFF(MINUTE, created_at, NOW()) AS mins FROM certificados WHERE id = ? AND empresa_id = ?',
+        [id, empresaId],
+      );
+      const mins = (chk as any[])[0]?.mins;
+      if (mins != null && Number(mins) > HORAS_BLOQUEO_CERT * 60) throw new CertBloqueadoError();
+    }
     const info = await emisionRepo._infoCertParaAudit(empresaId, id);
     const conn = await pool().getConnection();
     try {

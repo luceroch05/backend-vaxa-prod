@@ -39,6 +39,18 @@ export async function congelarGrupo(req: Request, res: Response): Promise<void> 
   res.json(cfg);
 }
 
+/** Plantilla base del diseño personalizado de la empresa (JSON del layout, o null). */
+export async function getLayoutBase(req: Request, res: Response): Promise<void> {
+  res.json({ layout_base: await configService.getLayoutBase(tid(req)) });
+}
+
+/** Guarda (o limpia con null) la plantilla base del diseño personalizado. */
+export async function saveLayoutBase(req: Request, res: Response): Promise<void> {
+  const { layout_base } = req.body ?? {};
+  await configService.saveLayoutBase(tid(req), layout_base ?? null, uid(req));
+  res.json({ ok: true });
+}
+
 /** Elimina la config específica del grupo (vuelve a heredar del programa) */
 export async function eliminarConfigGrupo(req: Request, res: Response): Promise<void> {
   const ok = await configService.eliminarConfigGrupo(

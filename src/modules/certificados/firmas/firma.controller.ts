@@ -14,6 +14,13 @@ export async function createFirma(req: Request, res: Response): Promise<void> {
   res.status(201).json(await firmaService.create(tid(req), { nombre_autoridad, cargo, imagen_firma }, uid(req)));
 }
 
+export async function updateFirma(req: Request, res: Response): Promise<void> {
+  const { nombre_autoridad, cargo, imagen_firma } = req.body ?? {};
+  const firma = await firmaService.update(tid(req), Number(req.params.id), { nombre_autoridad, cargo, imagen_firma }, uid(req));
+  if (!firma) { res.status(404).json({ error: 'Firma no encontrada' }); return; }
+  res.json(firma);
+}
+
 export async function deleteFirma(req: Request, res: Response): Promise<void> {
   const ok = await firmaService.remove(tid(req), Number(req.params.id), uid(req));
   if (!ok) { res.status(404).json({ error: 'Firma no encontrada' }); return; }
