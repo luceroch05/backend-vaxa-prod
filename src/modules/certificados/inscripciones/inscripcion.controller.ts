@@ -9,7 +9,8 @@ const uid = (req: Request): number | undefined => (req as any).authUser?.sub;
 
 export async function listInscripciones(req: Request, res: Response): Promise<void> {
   const grupoId = req.query.grupo_id ? Number(req.query.grupo_id) : undefined;
-  res.json(await inscripcionService.listAll(tid(req), grupoId));
+  const participanteId = req.query.participante_id ? Number(req.query.participante_id) : undefined;
+  res.json(await inscripcionService.listAll(tid(req), grupoId, participanteId));
 }
 
 export async function createInscripcion(req: Request, res: Response): Promise<void> {
@@ -37,6 +38,14 @@ export async function cambiarEstado(req: Request, res: Response): Promise<void> 
   const { estado_id } = req.body ?? {};
   if (!estado_id) { res.status(400).json({ error: 'estado_id es requerido' }); return; }
   const updated = await inscripcionService.cambiarEstado(tid(req), Number(req.params.id), { estado_id }, uid(req));
+  if (!updated) { res.status(404).json({ error: 'Inscripción no encontrada' }); return; }
+  res.json(updated);
+}
+
+export async function cambiarCalidad(req: Request, res: Response): Promise<void> {
+  const { calidad } = req.body ?? {};
+  if (!calidad?.trim()) { res.status(400).json({ error: 'calidad es requerida' }); return; }
+  const updated = await inscripcionService.cambiarCalidad(tid(req), Number(req.params.id), String(calidad).trim(), uid(req));
   if (!updated) { res.status(404).json({ error: 'Inscripción no encontrada' }); return; }
   res.json(updated);
 }

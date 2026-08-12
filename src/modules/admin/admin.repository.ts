@@ -44,6 +44,7 @@ export interface CrearEmpresaDto {
   logo?: string;            // data URL base64
   plan_id?: number;         // plan con el que arranca (default: Básico)
   ciclo_id?: number;        // ciclo de facturación (default: mensual)
+  precio_certificado?: number; // solo modo "Pago por certificado": S/ por cert emitido (default 20)
   permite_diseno?: boolean; // servicio a medida (Lienzo) que activa Vaxa por empresa
 }
 
@@ -237,9 +238,16 @@ export const adminRepo = {
       const planId = Number(dto.plan_id) || (await planRepo.getPlanIdBySlug('basico'));
       if (planId) {
         await planRepo.asignarPlan(empresaId, planId, Number(dto.ciclo_id) || 1);
+        const [pl] = await pool().query<any[]>('SELECT slug, creditos_incluidos FROM planes WHERE id = ?', [planId]);
+        const plan = (pl as any[])[0] ?? {};
+        // Modo "Pago por certificado": fija el precio del cliente (el que puso Vaxa,
+        // o 20 por defecto). asignarPlan ya lo dejó en 20; aquí lo sobreescribe si mandó otro.
+        if (plan.slug === 'pago_certificado') {
+          const precio = Number(dto.precio_certificado) > 0 ? Number(dto.precio_certificado) : 20;
+          await pool().query('UPDATE empresas SET precio_certificado = ? WHERE id = ?', [precio, empresaId]);
+        }
         // Créditos incluidos del plan → saldo inicial de la empresa (acumulables).
-        const [pl] = await pool().query<any[]>('SELECT creditos_incluidos FROM planes WHERE id = ?', [planId]);
-        const incluidos = Number((pl as any[])[0]?.creditos_incluidos ?? 0);
+        const incluidos = Number(plan.creditos_incluidos ?? 0);
         if (incluidos > 0) {
           await pool().query(
             `UPDATE empresas

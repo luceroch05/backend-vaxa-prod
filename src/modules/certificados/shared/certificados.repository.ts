@@ -4,7 +4,7 @@ import type { PoolConnection } from 'mysql2/promise';
 import { pool, getEmpresaId } from './db.helper';
 import { planRepo } from '../planes/plan.repository';
 import { auditoriaRepo, describirCambios } from '../auditoria/auditoria.repository';
-import { aTituloNombre } from '../../../shared/text';
+import { aTituloNombre, gradosACsv, gradosPrefijo } from '../../../shared/text';
 import { guardarImagen } from '../../../shared/imagenes';
 import { pdfService, type PdfDatos } from '../pdf/pdf.service';
 
@@ -823,11 +823,11 @@ export const participantesRepo = {
   async create(tenantSlug: string, dto: CreateParticipanteDto, userId?: number): Promise<ParticipanteEntity> {
     const empresaId = await getEmpresaId(tenantSlug);
     const [result] = await pool().query<any>(
-      `INSERT INTO participantes (empresa_id, tipo_documento_id, numero_documento, nombres, apellidos, email, telefono, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO participantes (empresa_id, tipo_documento_id, numero_documento, nombres, apellidos, email, telefono, grados, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [empresaId, dto.tipo_documento_id, dto.numero_documento,
        aTituloNombre(dto.nombres), aTituloNombre(dto.apellidos),
-       dto.email ?? null, dto.telefono ?? null, userId ?? null],
+       dto.email ?? null, dto.telefono ?? null, gradosACsv(dto.grados), userId ?? null],
     );
     const p = (await participantesRepo.findById(tenantSlug, result.insertId))!;
     auditoriaRepo.registrar({
@@ -850,6 +850,7 @@ export const participantesRepo = {
     if (dto.apellidos         !== undefined) { fields.push('apellidos = ?');         values.push(aTituloNombre(dto.apellidos)); }
     if (dto.email             !== undefined) { fields.push('email = ?');             values.push(dto.email || null); }
     if (dto.telefono          !== undefined) { fields.push('telefono = ?');          values.push(dto.telefono || null); }
+    if (dto.grados            !== undefined) { fields.push('grados = ?');            values.push(gradosACsv(dto.grados)); }
     if (fields.length) {
       values.push(id, empresaId);
       await pool().query(`UPDATE participantes SET ${fields.join(', ')} WHERE id = ? AND empresa_id = ?`, values);
@@ -893,18 +894,24 @@ async function inscripcionDuplicadaEnGrupo(
 // INSCRIPCIONES
 // ============================================================
 export const inscripcionesRepo = {
-  async findAll(tenantSlug: string, grupoId?: number): Promise<InscripcionEntity[]> {
+  async findAll(tenantSlug: string, grupoId?: number, participanteId?: number): Promise<InscripcionEntity[]> {
     const empresaId = await getEmpresaId(tenantSlug);
     const base = `
       SELECT i.*,
              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
-             p.numero_documento, g.nombre_grupo,
+             p.numero_documento, g.nombre_grupo, prog.nombre AS programa_nombre,
              ei.nombre AS estado_nombre
       FROM inscripciones i
       JOIN participantes p       ON p.id  = i.participante_id
       JOIN grupos_programas g    ON g.id  = i.grupo_id
+      JOIN programas prog        ON prog.id = g.programa_id
       JOIN estado_inscripcion ei ON ei.id = i.estado_id
       WHERE i.empresa_id = ?`;
+    // Filtro opcional por aula o por participante (para ver/editar la calidad desde el estudiante).
+    if (participanteId) {
+      const [rows] = await pool().query<any[]>(`${base} AND i.participante_id = ? ORDER BY i.created_at DESC`, [empresaId, participanteId]);
+      return (rows as any[]).map(InscripcionEntity.fromRow);
+    }
     const [rows] = grupoId
       ? await pool().query<any[]>(`${base} AND i.grupo_id = ? ORDER BY p.apellidos`, [empresaId, grupoId])
       : await pool().query<any[]>(`${base} ORDER BY i.created_at DESC`, [empresaId]);
@@ -946,6 +953,7 @@ export const inscripcionesRepo = {
         apellidos:         dto.apellidos,
         email:             dto.email,
         telefono:          dto.telefono,
+        grados:            dto.grados,
       }, userId);
     }
     // create() valida el duplicado en el programa y lanza el mensaje correspondiente.
@@ -1143,6 +1151,38 @@ export const inscripcionesRepo = {
       empresaId, usuarioId: userId, accion: 'editar', entidad: 'inscripcion', entidadId: id,
       entidadNombre: r.participante_nombre,
       descripcion: `Cambió el estado de ${r.participante_nombre}${r.numero_documento ? ` (${r.numero_documento})` : ''} a "${r.estado_nombre}" en el programa "${r.programa_nombre}" · aula "${r.nombre_grupo}"`,
+    });
+    return r ? InscripcionEntity.fromRow(r) : null;
+  },
+
+  /**
+   * Cambia la CALIDAD de participación de una inscripción (Participante, Ponente,
+   * Organizador…). Es por aula/evento, así que se corrige aquí, no en la persona.
+   */
+  async cambiarCalidad(tenantSlug: string, id: number, calidad: string, userId?: number): Promise<InscripcionEntity | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const cal = String(calidad ?? '').trim() || 'Participante';
+    const [upd] = await pool().query<any>(
+      'UPDATE inscripciones SET calidad = ?, user_actua_id = ? WHERE id = ? AND empresa_id = ?',
+      [cal, userId ?? null, id, empresaId],
+    );
+    if (!upd.affectedRows) return null;
+    const [rows] = await pool().query<any[]>(
+      `SELECT i.*, CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+              p.numero_documento, g.nombre_grupo, prog.nombre AS programa_nombre, ei.nombre AS estado_nombre
+       FROM inscripciones i
+       JOIN participantes p       ON p.id  = i.participante_id
+       JOIN grupos_programas g    ON g.id  = i.grupo_id
+       JOIN programas prog        ON prog.id = g.programa_id
+       JOIN estado_inscripcion ei ON ei.id = i.estado_id
+       WHERE i.id = ?`,
+      [id],
+    );
+    const r = rows[0];
+    if (r) auditoriaRepo.registrar({
+      empresaId, usuarioId: userId, accion: 'editar', entidad: 'inscripcion', entidadId: id,
+      entidadNombre: r.participante_nombre,
+      descripcion: `Cambió la calidad de ${r.participante_nombre}${r.numero_documento ? ` (${r.numero_documento})` : ''} a "${cal}" en el aula "${r.nombre_grupo}"`,
     });
     return r ? InscripcionEntity.fromRow(r) : null;
   },
@@ -2104,9 +2144,10 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
   let grupoId = 0;
   let nombreCorto: string = cert.participante_nombre;
   let calidad = 'Participante';
+  let prefijoGrados = '';   // "Mag. Lic. " si la persona tiene grados; se antepone al nombre
     if (cert.inscripcion_id) {
       const [insRows] = await pool().query<any[]>(
-        `SELECT i.grupo_id, i.calidad, SUBSTRING_INDEX(p.nombres, ' ', 1) AS primer_nombre, p.apellidos
+        `SELECT i.grupo_id, i.calidad, p.grados, SUBSTRING_INDEX(p.nombres, ' ', 1) AS primer_nombre, p.apellidos
            FROM inscripciones i JOIN participantes p ON p.id = i.participante_id
           WHERE i.id = ? LIMIT 1`,
         [cert.inscripcion_id],
@@ -2115,6 +2156,10 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       grupoId = r?.grupo_id ?? 0;
       if (r?.primer_nombre && r?.apellidos) nombreCorto = `${r.primer_nombre} ${r.apellidos}`.trim();
       if (r?.calidad) calidad = String(r.calidad);
+      // Los grados (Lic., Mag., …) solo se anteponen a NO participantes (ponentes,
+      // organizadores…). A un Participante normal el nombre va tal cual.
+      const esParticipante = (calidad || 'Participante').trim().toLowerCase() === 'participante';
+      prefijoGrados = esParticipante ? '' : gradosPrefijo(r?.grados);
     }
 
     // Buscar config: primero la del grupo, fallback a la del programa
@@ -2178,8 +2223,8 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
     }
 
     return {
-      participante_nombre:      cert.participante_nombre,
-      participante_nombre_corto: nombreCorto,
+      participante_nombre:      prefijoGrados + cert.participante_nombre,
+      participante_nombre_corto: prefijoGrados + nombreCorto,
       participante_calidad:      calidad,
       programa_nombre:      cert.programa_nombre,
       tipo_programa:        cert.tipo_programa_nombre ?? 'Certificado',

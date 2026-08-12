@@ -5,7 +5,7 @@ import { getCatalogos }                                              from './cat
 import { listProgramas, getPrograma, createPrograma, updatePrograma, setActivoPrograma, eliminarPrograma } from './programas/programa.controller';
 import { listGrupos, getGrupo, createGrupo, updateGrupo, setActivoGrupo, eliminarGrupo } from './grupos/grupo.controller';
 import { listParticipantes, getParticipante, createParticipante, buscarParticipante, setActivoParticipante, eliminarParticipante, actualizarParticipante } from './participantes/participante.controller';
-import { listInscripciones, createInscripcion, cambiarEstado, cambiarEstadoMasivo, eliminarInscripcion, inscribir, importarMasivo } from './inscripciones/inscripcion.controller';
+import { listInscripciones, createInscripcion, cambiarEstado, cambiarCalidad, cambiarEstadoMasivo, eliminarInscripcion, inscribir, importarMasivo } from './inscripciones/inscripcion.controller';
 import { listLogos, createLogo, updateLogo, deleteLogo }             from './logos/logo.controller';
 import { listFirmas, createFirma, updateFirma, deleteFirma }         from './firmas/firma.controller';
 import { getConfig, upsertConfig, listGruposConConfig, congelarGrupo, eliminarConfigGrupo, getLayoutBase, saveLayoutBase } from './config/config.controller';
@@ -55,6 +55,7 @@ router.post('/inscripciones/inscribir',         w(inscribir));               // 
 router.post('/inscripciones/importar',          w(importarMasivo));          // carga masiva por Excel (inscribe / opcional emite)
 router.patch('/inscripciones/estado-masivo',    w(cambiarEstadoMasivo));      // aprobar/cambiar varias a la vez
 router.patch('/inscripciones/:id/estado',       w(cambiarEstado));
+router.patch('/inscripciones/:id/calidad',      w(cambiarCalidad));           // corregir calidad (Ponente/Participante…)
 router.delete('/inscripciones/:id',   soloAdmin, w(eliminarInscripcion));    // borrar inscripción (con protección)
 
 // Logos (admision SÍ puede crear, editar y eliminar logos)

@@ -9,6 +9,8 @@ export class ParticipanteEntity {
   apellidos!: string;
   email?: string;
   telefono?: string;
+  /** Grados académicos que se anteponen al nombre (CSV, ej. "Mag.,Lic."). */
+  grados?: string;
   activo!: boolean;
   created_at!: string;
 

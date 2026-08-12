@@ -174,28 +174,44 @@ export const planRepo = {
     const conn = await pool().getConnection();
     try {
       await conn.beginTransaction();
-      const [c] = await conn.query<any[]>(
-        'SELECT meses_vigencia FROM ciclo_facturacion WHERE id = ?', [cicloId],
-      );
-      const meses = Number((c as any[])[0]?.meses_vigencia ?? 1);
 
-      // Cerrar la suscripción activa anterior (si la hay).
+      // ¿El plan es "Pago por certificado"? Ese modo NO tiene ciclo ni mantenimiento
+      // ni vencimiento: no se le crea suscripción, solo se apunta el plan y se fija
+      // el precio por certificado (default S/20 si aún no tiene).
+      const [pr] = await conn.query<any[]>('SELECT slug FROM planes WHERE id = ? LIMIT 1', [planId]);
+      const esPagoCert = (pr as any[])[0]?.slug === 'pago_certificado';
+
+      // Cerrar la suscripción activa anterior (si la hay) — aplica en ambos modos.
       await conn.query(
         `UPDATE empresa_suscripcion SET estado_id = 4, fecha_fin = CURDATE()
           WHERE empresa_id = ? AND estado_id = 1`,
         [empresaId],
       );
-      // Crear la nueva. Modelo Leonardo (mantenimiento a fin de mes):
-      //   fecha_inicio = hoy (implementación / cambio de plan) → fija el prorrateo.
-      //   fecha_fin    = "mantenimiento pagado hasta" = fin del mes ANTERIOR, así
-      //                  el mes actual queda como 1ra cuota pendiente (prorrateada).
-      void meses; // el ciclo ya no fija la vigencia; el mantenimiento es mensual (fin de mes)
-      await conn.query(
-        `INSERT INTO empresa_suscripcion (empresa_id, plan_id, ciclo_id, estado_id, fecha_inicio, fecha_fin)
-         VALUES (?, ?, ?, 1, CURDATE(), LAST_DAY(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)))`,
-        [empresaId, planId, cicloId],
-      );
-      // Puntero rápido al plan vigente.
+
+      if (esPagoCert) {
+        // Sin suscripción de ciclo. Fija el precio si aún no lo tiene (default 20).
+        await conn.query(
+          'UPDATE empresas SET precio_certificado = COALESCE(precio_certificado, 20.00) WHERE id = ?',
+          [empresaId],
+        );
+      } else {
+        const [c] = await conn.query<any[]>(
+          'SELECT meses_vigencia FROM ciclo_facturacion WHERE id = ?', [cicloId],
+        );
+        const meses = Number((c as any[])[0]?.meses_vigencia ?? 1);
+        // Crear la nueva. Modelo Leonardo (mantenimiento a fin de mes):
+        //   fecha_inicio = hoy (implementación / cambio de plan) → fija el prorrateo.
+        //   fecha_fin    = "mantenimiento pagado hasta" = fin del mes ANTERIOR, así
+        //                  el mes actual queda como 1ra cuota pendiente (prorrateada).
+        void meses; // el ciclo ya no fija la vigencia; el mantenimiento es mensual (fin de mes)
+        await conn.query(
+          `INSERT INTO empresa_suscripcion (empresa_id, plan_id, ciclo_id, estado_id, fecha_inicio, fecha_fin)
+           VALUES (?, ?, ?, 1, CURDATE(), LAST_DAY(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)))`,
+          [empresaId, planId, cicloId],
+        );
+      }
+
+      // Puntero rápido al plan vigente (ambos modos).
       await conn.query('UPDATE empresas SET plan_actual_id = ? WHERE id = ?', [planId, empresaId]);
       await conn.commit();
     } catch (e) {

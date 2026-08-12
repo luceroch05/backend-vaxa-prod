@@ -22,4 +22,6 @@ export interface InscribirDto {
   fecha_inscripcion?: string;
   /** Calidad de participación. Solo el admin lo puede setear; la web pública NO. */
   calidad?: string;
+  /** Grados académicos de la persona (solo se aplican al CREAR el participante). */
+  grados?: string[];
 }

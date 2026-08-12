@@ -1,0 +1,12 @@
+-- =========================================================
+--  FEATURE: Grados académicos del participante (Lic., Mag., Dr., T.M., …)
+--  ---------------------------------------------------------
+--  Guarda en la PERSONA los grados que se anteponen a su nombre en el
+--  certificado. Se elige con un multi-select de abreviaturas fijas y se
+--  almacena como CSV, ej: "Mag.,Lic.". Al emitir/previsualizar el nombre
+--  sale "Mag. Lic. Juan Pérez".
+--
+--  ✅ ADITIVO. Correr UNA vez:
+--     mysql -u USUARIO -p BASE < scripts/mysql-grados-participante.sql
+-- =========================================================
+ALTER TABLE participantes ADD COLUMN grados VARCHAR(120) NULL;

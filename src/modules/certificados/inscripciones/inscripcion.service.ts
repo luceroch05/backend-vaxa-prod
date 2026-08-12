@@ -2,10 +2,11 @@ import { inscripcionesRepo } from '../shared/certificados.repository';
 import type { CreateInscripcionDto, CambiarEstadoDto, InscribirDto } from './inscripcion.dto';
 
 export const inscripcionService = {
-  listAll:       (tenantSlug: string, grupoId?: number)                              => inscripcionesRepo.findAll(tenantSlug, grupoId),
+  listAll:       (tenantSlug: string, grupoId?: number, participanteId?: number)      => inscripcionesRepo.findAll(tenantSlug, grupoId, participanteId),
   create:        (tenantSlug: string, dto: CreateInscripcionDto, uid?: number)        => inscripcionesRepo.create(tenantSlug, dto, uid),
   inscribir:     (tenantSlug: string, dto: InscribirDto, uid?: number)               => inscripcionesRepo.inscribir(tenantSlug, dto, uid),
   cambiarEstado: (tenantSlug: string, id: number, dto: CambiarEstadoDto, uid?: number) => inscripcionesRepo.cambiarEstado(tenantSlug, id, dto.estado_id, uid),
+  cambiarCalidad: (tenantSlug: string, id: number, calidad: string, uid?: number) => inscripcionesRepo.cambiarCalidad(tenantSlug, id, calidad, uid),
   cambiarEstadoMasivo: (tenantSlug: string, ids: number[], estadoId: number, uid?: number) => inscripcionesRepo.cambiarEstadoMasivo(tenantSlug, ids, estadoId, uid),
   importarMasivo: (
     tenantSlug: string,

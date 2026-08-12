@@ -5,6 +5,8 @@ export interface CreateParticipanteDto {
   apellidos: string;
   email?: string;
   telefono?: string;
+  /** Grados académicos (abreviaturas) que se anteponen al nombre en el certificado. */
+  grados?: string[];
 }
 
 export type UpdateParticipanteDto = Partial<CreateParticipanteDto>;

@@ -38,6 +38,16 @@ async function registrarHistorial(
 /** Plazo legal de respuesta del proveedor: 15 días hábiles improrrogables. */
 const PLAZO_DIAS_HABILES = 15;
 
+/**
+ * Topes de texto calibrados para que quepan en las cajas de la Hoja de
+ * Reclamación (PDF A4, Helvetica 9pt): detalle ~8 líneas, pedido ~6 líneas.
+ * Deben coincidir con los del formulario público (LibroReclamaciones).
+ */
+const MAX_DETALLE = 700;
+const MAX_PEDIDO = 400;
+/** Respuesta oficial del proveedor: cabe en su caja del PDF (~450). */
+const MAX_RESPUESTA = 450;
+
 /** Nota por defecto de cada estado, para que la línea de tiempo sea legible. */
 const ETIQUETA_ESTADO: Record<number, string> = {
   [ESTADO.PENDIENTE]:  'Reclamo recibido, pendiente de atención.',
@@ -99,10 +109,16 @@ export const reclamoRepo = {
     const tipoId = TIPO_ID[String(rc.tipo || '').toUpperCase()];
     if (!tipoId) throw new AppError('Indica si es un Reclamo o una Queja.', 400);
 
-    const detalle = limpio(rc.detalle, 5000);
+    const detalle = limpio(rc.detalle, MAX_DETALLE);
     if (!detalle) throw new AppError('Describe el detalle de tu reclamo o queja.', 400);
-    const pedido = limpio(rc.pedido, 5000);
+    if (String(rc.detalle ?? '').trim().length > MAX_DETALLE) {
+      throw new AppError(`El detalle no debe superar los ${MAX_DETALLE} caracteres (para que entre en la Hoja de Reclamación).`, 400);
+    }
+    const pedido = limpio(rc.pedido, MAX_PEDIDO);
     if (!pedido) throw new AppError('Indica tu pedido concreto.', 400);
+    if (String(rc.pedido ?? '').trim().length > MAX_PEDIDO) {
+      throw new AppError(`El pedido no debe superar los ${MAX_PEDIDO} caracteres (para que entre en la Hoja de Reclamación).`, 400);
+    }
 
     const esMenor = !!c.esMenor;
     let apoderadoNombre: string | null = null;
@@ -221,8 +237,11 @@ export const reclamoRepo = {
 
   /** Registra la respuesta/acciones del proveedor y marca el reclamo atendido. */
   async responder(id: number, input: ResponderInput): Promise<Reclamo> {
-    const respuesta = limpio(input.respuesta, 5000);
+    const respuesta = limpio(input.respuesta, MAX_RESPUESTA);
     if (!respuesta) throw new AppError('Escribe la respuesta o las acciones adoptadas.', 400);
+    if (String(input.respuesta ?? '').trim().length > MAX_RESPUESTA) {
+      throw new AppError(`La respuesta no debe superar los ${MAX_RESPUESTA} caracteres (para que entre en la Hoja de Reclamación).`, 400);
+    }
     const estadoId = input.estadoId && [ESTADO.EN_PROCESO, ESTADO.ATENDIDO, ESTADO.CERRADO].includes(input.estadoId as any)
       ? input.estadoId
       : ESTADO.ATENDIDO;
