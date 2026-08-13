@@ -89,7 +89,7 @@ export const creditosRepo = {
       `SELECT e.id, e.razon_social, e.tenant_slug,
               e.creditos_disponibles, e.creditos_asignados_total,
               (e.creditos_asignados_total - e.creditos_disponibles) AS creditos_consumidos,
-              (p.id IS NOT NULL AND p.creditos_incluidos = 0) AS ilimitado
+              (p.id IS NOT NULL AND p.creditos_incluidos = 0 AND p.slug <> 'pago_certificado') AS ilimitado
        FROM empresas e
        LEFT JOIN planes p ON p.id = e.plan_actual_id
        WHERE e.activo = 1 ORDER BY e.razon_social`,

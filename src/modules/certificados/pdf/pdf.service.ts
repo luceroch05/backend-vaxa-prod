@@ -32,6 +32,10 @@ export interface PdfDatos {
   participante_nombre_corto?: string;
   /** Rol/calidad de participación (para la variable {calidad}). */
   participante_calidad?: string;
+  /** Número de documento (variable {documento}). */
+  participante_documento?: string;
+  /** Código del tipo de documento, ej. "DNI" / "CE" (variable {tipoDocumento}). */
+  participante_tipo_doc?: string;
   programa_nombre:     string;
   tipo_programa:       string;
   horas_academicas:    number;
@@ -383,6 +387,8 @@ async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrD
     participante: datos.participante_nombre,
     nombreCorto:  datos.participante_nombre_corto ?? datos.participante_nombre,
     calidad:      datos.participante_calidad ?? 'Participante',
+    documento:      datos.participante_documento ?? '',
+    tipoDocumento:  datos.participante_tipo_doc ?? '',
     programa:     datos.programa_nombre,
     curso:        datos.programa_nombre,
     tipo:         datos.tipo_programa,

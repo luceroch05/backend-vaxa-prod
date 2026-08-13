@@ -117,4 +117,6 @@ export interface EstadoPlan {
   } & Cobranza) | null;
   consumo: ConsumoMes;
   creditos: CreditosSaldo;
+  /** Precio por certificado (solo modo "Pago por certificado"). null = no aplica. */
+  precio_certificado?: number | null;
 }

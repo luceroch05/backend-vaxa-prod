@@ -2145,10 +2145,17 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
   let nombreCorto: string = cert.participante_nombre;
   let calidad = 'Participante';
   let prefijoGrados = '';   // "Mag. Lic. " si la persona tiene grados; se antepone al nombre
+  // Documento del participante (variables {documento} y {tipoDocumento}).
+  let documento = String(cert.numero_documento ?? '').trim();
+  let tipoDoc = '';   // código legible, ej. "DNI", "CE"
     if (cert.inscripcion_id) {
       const [insRows] = await pool().query<any[]>(
-        `SELECT i.grupo_id, i.calidad, p.grados, SUBSTRING_INDEX(p.nombres, ' ', 1) AS primer_nombre, p.apellidos
-           FROM inscripciones i JOIN participantes p ON p.id = i.participante_id
+        `SELECT i.grupo_id, i.calidad, p.grados, p.numero_documento,
+                td.codigo AS tipo_doc_codigo,
+                SUBSTRING_INDEX(p.nombres, ' ', 1) AS primer_nombre, p.apellidos
+           FROM inscripciones i
+           JOIN participantes p ON p.id = i.participante_id
+           LEFT JOIN tipos_documento td ON td.id = p.tipo_documento_id
           WHERE i.id = ? LIMIT 1`,
         [cert.inscripcion_id],
       );
@@ -2156,6 +2163,8 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       grupoId = r?.grupo_id ?? 0;
       if (r?.primer_nombre && r?.apellidos) nombreCorto = `${r.primer_nombre} ${r.apellidos}`.trim();
       if (r?.calidad) calidad = String(r.calidad);
+      if (r?.numero_documento) documento = String(r.numero_documento).trim();
+      if (r?.tipo_doc_codigo)  tipoDoc = String(r.tipo_doc_codigo).trim();
       // Los grados (Lic., Mag., …) solo se anteponen a NO participantes (ponentes,
       // organizadores…). A un Participante normal el nombre va tal cual.
       const esParticipante = (calidad || 'Participante').trim().toLowerCase() === 'participante';
@@ -2226,6 +2235,8 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       participante_nombre:      prefijoGrados + cert.participante_nombre,
       participante_nombre_corto: prefijoGrados + nombreCorto,
       participante_calidad:      calidad,
+      participante_documento:   documento,
+      participante_tipo_doc:    tipoDoc,
       programa_nombre:      cert.programa_nombre,
       tipo_programa:        cert.tipo_programa_nombre ?? 'Certificado',
       horas_academicas:     cert.horas_academicas ?? 0,

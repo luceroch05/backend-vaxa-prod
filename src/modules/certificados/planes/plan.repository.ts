@@ -102,16 +102,20 @@ function periodoActual(): { anio: number; mes: number } {
 /**
  * ¿El plan vigente de la empresa es ILIMITADO? Convención: `creditos_incluidos = 0`
  * (ej. Corporativo). En ese caso la emisión no consume ni se bloquea por saldo.
+ * EXCEPCIÓN: "Pago por certificado" también tiene creditos_incluidos = 0 pero SÍ es
+ * limitado — solo puede emitir los créditos que se le recargaron (se bloquea en 0).
  */
 async function planEsIlimitado(conn: PoolConnection, empresaId: number): Promise<boolean> {
   const [rows] = await conn.query<any[]>(
-    `SELECT p.creditos_incluidos
+    `SELECT p.creditos_incluidos, p.slug
        FROM empresas e
        JOIN planes p ON p.id = e.plan_actual_id
       WHERE e.id = ?`,
     [empresaId],
   );
-  return rows.length > 0 && Number(rows[0].creditos_incluidos) === 0;
+  return rows.length > 0
+    && Number(rows[0].creditos_incluidos) === 0
+    && rows[0].slug !== 'pago_certificado';
 }
 
 export const planRepo = {
@@ -246,7 +250,18 @@ export const planRepo = {
       [empresaId],
     );
 
-    const plan = sus.length ? PlanEntity.fromRow(sus[0]) : null;
+    let plan = sus.length ? PlanEntity.fromRow(sus[0]) : null;
+
+    // "Pago por certificado" (y cualquier plan sin suscripción de ciclo): NO hay fila
+    // en empresa_suscripcion, pero la empresa apunta al plan con `plan_actual_id`.
+    // Lo cargamos de ahí para que NO aparezca como "Sin plan".
+    if (!plan) {
+      const [pa] = await pool().query<any[]>(
+        `SELECT p.* FROM empresas e JOIN planes p ON p.id = e.plan_actual_id WHERE e.id = ? LIMIT 1`,
+        [empresaId],
+      );
+      if ((pa as any[]).length) plan = PlanEntity.fromRow((pa as any[])[0]);
+    }
 
     // El "Diseño personalizado (Lienzo)" se habilita A PARTIR DEL PLAN PROFESIONAL
     // (planes.permite_diseno = 1 en Profesional / Empresarial / Corporativo) O, de
@@ -301,12 +316,25 @@ export const planRepo = {
       [empresaId],
     );
     const recargados = Number(rec[0]?.recargados ?? 0);
+
+    // Precio por certificado (solo modo "Pago por certificado"). Tolerante si la
+    // columna aún no se creó (la crea el panel admin al operar empresas).
+    let precioCertificado: number | null = null;
+    try {
+      const [pc] = await pool().query<any[]>(
+        'SELECT precio_certificado FROM empresas WHERE id = ? LIMIT 1', [empresaId],
+      );
+      const v = (pc as any[])[0]?.precio_certificado;
+      precioCertificado = v == null ? null : Number(v);
+    } catch { /* columna aún no creada */ }
+
     const creditos: CreditosSaldo = {
       disponibles, asignados,
       consumidos: Math.max(asignados - disponibles, 0),
       recargados,
       // Plan ilimitado (creditos_incluidos = 0, ej. Corporativo): emite sin tope.
-      ilimitado: !!plan && Number(plan.creditos_incluidos) === 0,
+      // "Pago por certificado" también tiene 0 incluidos pero SÍ es limitado (por recargas).
+      ilimitado: !!plan && Number(plan.creditos_incluidos) === 0 && plan.slug !== 'pago_certificado',
     };
 
     return {
@@ -329,6 +357,7 @@ export const planRepo = {
         : null,
       consumo,
       creditos,
+      precio_certificado: precioCertificado,
     };
   },
 

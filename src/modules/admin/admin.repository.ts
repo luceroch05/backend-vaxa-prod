@@ -35,6 +35,27 @@ async function ensurePermiteDiseno(): Promise<void> {
   _ensuredDiseno = true;
 }
 
+/**
+ * Auto-sana la columna `empresas.precio_certificado` (modo "Pago por certificado":
+ * S/ por cada certificado emitido, configurable por cliente). NULL = la empresa no
+ * está en ese modo. Si no existe, la crea, así no hace falta migración manual.
+ */
+let _ensuredPrecioCert = false;
+async function ensurePrecioCertificado(): Promise<void> {
+  if (_ensuredPrecioCert) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'empresas'
+        AND COLUMN_NAME = 'precio_certificado' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query(
+      `ALTER TABLE empresas ADD COLUMN precio_certificado DECIMAL(10,2) NULL`,
+    );
+  }
+  _ensuredPrecioCert = true;
+}
+
 export interface CrearEmpresaDto {
   razon_social: string;
   tenant_slug?: string;
@@ -57,6 +78,7 @@ export interface EditarEmpresaDto {
   logo?: string;            // data URL base64; '' para quitar
   activo?: boolean;
   permite_diseno?: boolean; // servicio a medida (Lienzo) que activa Vaxa por empresa
+  precio_certificado?: number; // solo modo "Pago por certificado": S/ por cert emitido
 }
 
 export interface CrearUsuarioDto {
@@ -81,9 +103,10 @@ export const adminRepo = {
   /** Empresas con saldo y consumo (para el panel de Vaxa). */
   async listEmpresas() {
     await ensurePermiteDiseno();
+    await ensurePrecioCertificado();
     const [rows] = await pool().query<any[]>(
       `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo,
-              permite_diseno,
+              permite_diseno, precio_certificado,
               creditos_disponibles, creditos_asignados_total,
               (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
        FROM empresas ORDER BY razon_social`,
@@ -94,6 +117,7 @@ export const adminRepo = {
   /** Actualiza los datos de una empresa. */
   async updateEmpresa(id: number, dto: EditarEmpresaDto) {
     await ensurePermiteDiseno();
+    await ensurePrecioCertificado();
     const [exist] = await pool().query<any[]>('SELECT id FROM empresas WHERE id = ? LIMIT 1', [id]);
     if (!(exist as any[]).length) throw new Error('Empresa no encontrada');
 
@@ -117,6 +141,13 @@ export const adminRepo = {
     if (dto.logo !== undefined)    { fields.push('logo_url = ?'); values.push(guardarImagen(dto.logo, 'empresas') || null); }
     if (dto.activo !== undefined)  { fields.push('activo = ?');  values.push(dto.activo ? 1 : 0); }
     if (dto.permite_diseno !== undefined) { fields.push('permite_diseno = ?'); values.push(dto.permite_diseno ? 1 : 0); }
+    // Precio por certificado (modo "Pago por certificado"). Debe ser > 0; solo aplica
+    // si la empresa está en ese plan, pero se guarda tal cual (NULL si mandan 0/negativo).
+    if (dto.precio_certificado !== undefined) {
+      const precio = Number(dto.precio_certificado);
+      fields.push('precio_certificado = ?');
+      values.push(Number.isFinite(precio) && precio > 0 ? Math.round(precio * 100) / 100 : null);
+    }
 
     if (fields.length) {
       values.push(id);
@@ -125,7 +156,7 @@ export const adminRepo = {
 
     const [rows] = await pool().query<any[]>(
       `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo,
-              permite_diseno,
+              permite_diseno, precio_certificado,
               creditos_disponibles, creditos_asignados_total,
               (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
        FROM empresas WHERE id = ?`, [id],
