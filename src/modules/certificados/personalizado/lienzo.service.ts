@@ -123,7 +123,14 @@ function fontFile(sub: string, file: string): string | null {
 }
 
 /** Fuentes disponibles tras registrarlas en el doc. */
-interface FuentesReg { montserrat: boolean; medium: boolean; semibold: boolean; bebas: boolean; barlow: boolean; }
+interface FuentesReg {
+  montserrat: boolean; medium: boolean; semibold: boolean; bebas: boolean; barlow: boolean;
+  poppins: boolean; poppinsMed: boolean; poppinsSemi: boolean; poppinsBold: boolean;
+  greatvibes: boolean; cardo: boolean; cardoBold: boolean; lobster: boolean;
+  pacifico: boolean; sacramento: boolean; allura: boolean; alexbrush: boolean;
+  tangerine: boolean; tangerineBold: boolean; parisienne: boolean;
+  cinzel: boolean; cinzelBold: boolean; abril: boolean; crimson: boolean; crimsonBold: boolean;
+}
 
 /** Registra las fuentes de marca en el doc. Devuelve cuáles quedaron disponibles. */
 function registrarFuentes(doc: any): FuentesReg {
@@ -146,14 +153,51 @@ function registrarFuentes(doc: any): FuentesReg {
     reg('Barlow-SemiBold',  'barlowcondensed', 'BarlowCondensed-SemiBold.ttf') &&
     reg('Barlow-Bold',      'barlowcondensed', 'BarlowCondensed-Bold.ttf') &&
     reg('Barlow-ExtraBold', 'barlowcondensed', 'BarlowCondensed-ExtraBold.ttf');
-  return { montserrat, medium, semibold, bebas, barlow };
+  // Nuevas familias (más estilos para los textos)
+  const poppins     = reg('Poppins',          'poppins', 'Poppins-Regular.ttf');
+  const poppinsMed  = reg('Poppins-Medium',   'poppins', 'Poppins-Medium.ttf');
+  const poppinsSemi = reg('Poppins-SemiBold', 'poppins', 'Poppins-SemiBold.ttf');
+  const poppinsBold = reg('Poppins-Bold',     'poppins', 'Poppins-Bold.ttf');
+  const greatvibes  = reg('GreatVibes', 'greatvibes', 'GreatVibes-Regular.ttf');
+  const cardo       = reg('Cardo',      'cardo', 'Cardo-Regular.ttf');
+  const cardoBold   = reg('Cardo-Bold', 'cardo', 'Cardo-Bold.ttf');
+  const lobster     = reg('Lobster',    'lobster', 'Lobster-Regular.ttf');
+  // Más familias: manuscritas/script + display + serif formal
+  const pacifico      = reg('Pacifico',   'pacifico',   'Pacifico-Regular.ttf');
+  const sacramento    = reg('Sacramento', 'sacramento', 'Sacramento-Regular.ttf');
+  const allura        = reg('Allura',     'allura',     'Allura-Regular.ttf');
+  const alexbrush     = reg('AlexBrush',  'alexbrush',  'AlexBrush-Regular.ttf');
+  const tangerine     = reg('Tangerine',      'tangerine', 'Tangerine-Regular.ttf');
+  const tangerineBold = reg('Tangerine-Bold', 'tangerine', 'Tangerine-Bold.ttf');
+  const parisienne    = reg('Parisienne', 'parisienne', 'Parisienne-Regular.ttf');
+  const cinzel        = reg('CinzelDecorative',      'cinzeldecorative', 'CinzelDecorative-Regular.ttf');
+  const cinzelBold    = reg('CinzelDecorative-Bold', 'cinzeldecorative', 'CinzelDecorative-Bold.ttf');
+  const abril         = reg('AbrilFatface', 'abrilfatface', 'AbrilFatface-Regular.ttf');
+  const crimson       = reg('CrimsonText',      'crimsontext', 'CrimsonText-Regular.ttf');
+  const crimsonBold   = reg('CrimsonText-Bold', 'crimsontext', 'CrimsonText-Bold.ttf');
+  return { montserrat, medium, semibold, bebas, barlow,
+           poppins, poppinsMed, poppinsSemi, poppinsBold, greatvibes, cardo, cardoBold, lobster,
+           pacifico, sacramento, allura, alexbrush, tangerine, tangerineBold, parisienne,
+           cinzel, cinzelBold, abril, crimson, crimsonBold };
 }
 
-const REG_VACIO: FuentesReg = { montserrat: false, medium: false, semibold: false, bebas: false, barlow: false };
+const REG_VACIO: FuentesReg = {
+  montserrat: false, medium: false, semibold: false, bebas: false, barlow: false,
+  poppins: false, poppinsMed: false, poppinsSemi: false, poppinsBold: false,
+  greatvibes: false, cardo: false, cardoBold: false, lobster: false,
+  pacifico: false, sacramento: false, allura: false, alexbrush: false,
+  tangerine: false, tangerineBold: false, parisienne: false,
+  cinzel: false, cinzelBold: false, abril: false, crimson: false, crimsonBold: false,
+};
+
+type FontFamilia =
+  | 'sans' | 'serif' | 'bebas' | 'barlow' | 'poppins' | 'vibes' | 'cardo' | 'lobster'
+  | 'pacifico' | 'sacramento' | 'allura' | 'alexbrush' | 'tangerine' | 'parisienne'
+  | 'cinzel' | 'abril' | 'crimson';
 
 function fontFor(
   bold?: boolean, italic?: boolean,
-  font?: 'sans' | 'serif' | 'bebas' | 'barlow',
+  font?: FontFamilia,
   reg: FuentesReg = REG_VACIO,
   weight?: 400 | 500 | 600 | 700 | 800,
 ): string {
@@ -168,6 +212,32 @@ function fontFor(
     if (w >= 600) return 'Barlow-SemiBold';
     return 'Barlow';
   }
+
+  // Poppins: sans geométrica moderna (varios pesos).
+  if (font === 'poppins' && reg.poppins) {
+    const w = weight ?? (bold ? 700 : 400);
+    if (w >= 700 && reg.poppinsBold) return 'Poppins-Bold';
+    if (w >= 600 && reg.poppinsSemi) return 'Poppins-SemiBold';
+    if (w >= 500 && reg.poppinsMed)  return 'Poppins-Medium';
+    return 'Poppins';
+  }
+  // Great Vibes: manuscrita elegante (un solo peso; ideal para nombres).
+  if (font === 'vibes' && reg.greatvibes) return 'GreatVibes';
+  // Cardo: serif clásica formal (regular/negrita).
+  if (font === 'cardo' && reg.cardo) return (bold && reg.cardoBold) ? 'Cardo-Bold' : 'Cardo';
+  // Lobster: script display para títulos (un solo peso).
+  if (font === 'lobster' && reg.lobster) return 'Lobster';
+  // Manuscritas / script (un solo peso salvo Tangerine).
+  if (font === 'pacifico'   && reg.pacifico)   return 'Pacifico';
+  if (font === 'sacramento' && reg.sacramento) return 'Sacramento';
+  if (font === 'allura'     && reg.allura)     return 'Allura';
+  if (font === 'alexbrush'  && reg.alexbrush)  return 'AlexBrush';
+  if (font === 'parisienne' && reg.parisienne) return 'Parisienne';
+  if (font === 'tangerine'  && reg.tangerine)  return (bold && reg.tangerineBold) ? 'Tangerine-Bold' : 'Tangerine';
+  // Display / serif formal (diploma).
+  if (font === 'cinzel'  && reg.cinzel)  return (bold && reg.cinzelBold) ? 'CinzelDecorative-Bold' : 'CinzelDecorative';
+  if (font === 'abril'   && reg.abril)   return 'AbrilFatface';
+  if (font === 'crimson' && reg.crimson) return (bold && reg.crimsonBold) ? 'CrimsonText-Bold' : 'CrimsonText';
 
   if (font === 'serif') {
     if (bold && italic) return 'Times-BoldItalic';

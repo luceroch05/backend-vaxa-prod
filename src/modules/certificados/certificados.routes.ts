@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { w } from './shared/router.helper';
 
 import { getCatalogos }                                              from './catalogos/catalogo.controller';
+import { listCalidades, createCalidad, updateCalidad }               from './calidades/calidad.controller';
 import { listProgramas, getPrograma, createPrograma, updatePrograma, setActivoPrograma, eliminarPrograma } from './programas/programa.controller';
 import { listGrupos, getGrupo, createGrupo, updateGrupo, setActivoGrupo, eliminarGrupo } from './grupos/grupo.controller';
 import { listParticipantes, getParticipante, createParticipante, buscarParticipante, setActivoParticipante, eliminarParticipante, actualizarParticipante } from './participantes/participante.controller';
@@ -22,6 +23,11 @@ const router = Router();
 
 // Catalogos
 router.get('/catalogos',                        w(getCatalogos));
+
+// Calidades de participación (catálogo por empresa; reemplaza el hardcode del front)
+router.get('/calidades',                        w(listCalidades));
+router.post('/calidades',                       w(createCalidad));
+router.patch('/calidades/:id',                  w(updateCalidad));
 
 // Programas
 router.get('/programas',                        w(listProgramas));
