@@ -22,6 +22,7 @@ import { tarifarioRoutes } from './modules/tarifario/tarifario.routes';
 import { authRoutes } from './modules/auth/auth.routes';
 import { backofficeRoutes } from './modules/backoffice/backoffice.routes';
 import { pacientesRoutes } from './modules/pacientes/pacientes.routes';
+import { historiasRoutes } from './modules/historias/historias.routes';
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes';
 import { certificadosRoutes } from './modules/certificados/certificados.routes';
 import { publicCertificadosRoutes } from './modules/certificados/public/public.routes';
@@ -120,6 +121,10 @@ app.use(`${BASE_PATH}/public/reclamos`, publicLimiter, reclamosPublicRoutes);
 
 /** Certificados: JWT + verificación de que el tenant del token == x-tenant-id */
 app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, certificadosRoutes);
+
+/** Historias Clínicas (centros terapéuticos): mismo stack que certificados —
+ *  JWT + tenant del token == x-tenant-id + bloqueo por vencimiento de pago. */
+app.use(`${BASE_PATH}/api/historias`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, historiasRoutes);
 
 /** Administración Vaxa: JWT + solo tenant raíz (créditos, empresas y usuarios de todas las empresas) */
 app.use(`${BASE_PATH}/api/admin/creditos`,      jwtMiddleware, requireRootTenant, creditosAdminRoutes);

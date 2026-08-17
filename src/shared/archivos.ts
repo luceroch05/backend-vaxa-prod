@@ -41,8 +41,10 @@ function sanitizarNombre(nombre: string, ext: string): string {
   return (base || `archivo.${ext}`).slice(0, 200);
 }
 
-/** Escribe el buffer como archivo adjunto y devuelve su metadata. Valida MIME y tamaño. */
-export function guardarAdjunto(buffer: Buffer, mime: string, nombreOriginal: string): AdjuntoGuardado {
+/** Escribe el buffer como archivo adjunto y devuelve su metadata. Valida MIME y tamaño.
+ *  `subcarpeta` permite reutilizar el mismo guardado en otros módulos (p. ej. 'hc'
+ *  para historias clínicas); por defecto usa la de reclamos. */
+export function guardarAdjunto(buffer: Buffer, mime: string, nombreOriginal: string, subcarpeta: string = SUBCARPETA): AdjuntoGuardado {
   const tipo = String(mime || '').toLowerCase().split(';')[0].trim();
   const ext = EXT_POR_MIME[tipo];
   if (!ext) throw new AppError('Tipo de archivo no permitido. Adjunta PDF, imagen (JPG/PNG) o Word.', 400);
@@ -50,14 +52,14 @@ export function guardarAdjunto(buffer: Buffer, mime: string, nombreOriginal: str
   if (buffer.length > ADJUNTO_MAX_BYTES) throw new AppError('El archivo supera el máximo de 10 MB.', 400);
 
   const hash = crypto.createHash('sha1').update(buffer).digest('hex').slice(0, 24);
-  const dir = path.join(UPLOADS_DIR, SUBCARPETA);
+  const dir = path.join(UPLOADS_DIR, subcarpeta);
   fs.mkdirSync(dir, { recursive: true });
   const archivo = `${hash}.${ext}`;
   const absoluta = path.join(dir, archivo);
   if (!fs.existsSync(absoluta)) fs.writeFileSync(absoluta, buffer);
 
   return {
-    ruta: `/uploads/${SUBCARPETA}/${archivo}`,
+    ruta: `/uploads/${subcarpeta}/${archivo}`,
     nombre: sanitizarNombre(nombreOriginal, ext),
     mime: tipo,
     tamano: buffer.length,
@@ -69,7 +71,8 @@ export function guardarAdjunto(buffer: Buffer, mime: string, nombreOriginal: str
  * (formato correcto + el archivo existe en disco). Evita que el POST de creación
  * inyecte rutas arbitrarias.
  */
-export function esRutaAdjuntoValida(ruta: string): boolean {
-  if (!/^\/uploads\/reclamos\/[a-f0-9]{24}\.(pdf|png|jpg|webp|doc|docx)$/.test(ruta || '')) return false;
+export function esRutaAdjuntoValida(ruta: string, subcarpeta: string = SUBCARPETA): boolean {
+  const re = new RegExp(`^/uploads/${subcarpeta}/[a-f0-9]{24}\\.(pdf|png|jpg|webp|doc|docx)$`);
+  if (!re.test(ruta || '')) return false;
   return fs.existsSync(path.join(process.cwd(), ruta.replace(/^\//, '')));
 }
