@@ -129,6 +129,96 @@ router.post('/historias/:id/diagnosticos', escribeClinico, w(async (req, res) =>
   res.status(201).json(await historiasRepo.addDiagnostico(tid(req), Number(req.params.id), req.body ?? {}, uid(req)));
 }));
 
+// ── Objetivos terapéuticos + progreso ─────────────────────────────────────────
+router.get('/historias/:id/objetivos', w(async (req, res) => {
+  res.json(await historiasRepo.listObjetivos(tid(req), Number(req.params.id)));
+}));
+
+router.post('/historias/:id/objetivos', escribeClinico, w(async (req, res) => {
+  res.status(201).json(await historiasRepo.createObjetivo(tid(req), Number(req.params.id), req.body ?? {}, uid(req)));
+}));
+
+router.patch('/objetivos/:id', escribeClinico, w(async (req, res) => {
+  const o = await historiasRepo.updateObjetivo(tid(req), Number(req.params.id), req.body ?? {});
+  if (!o) { res.status(404).json({ error: 'Objetivo no encontrado' }); return; }
+  res.json(o);
+}));
+
+router.delete('/objetivos/:id', escribeClinico, w(async (req, res) => {
+  const ok = await historiasRepo.deleteObjetivo(tid(req), Number(req.params.id));
+  if (!ok) { res.status(404).json({ error: 'Objetivo no encontrado' }); return; }
+  res.status(204).send();
+}));
+
+router.get('/objetivos/:id/avance', w(async (req, res) => {
+  res.json(await historiasRepo.listAvance(tid(req), Number(req.params.id)));
+}));
+
+router.post('/objetivos/:id/avance', escribeClinico, w(async (req, res) => {
+  res.status(201).json(await historiasRepo.addAvance(tid(req), Number(req.params.id), req.body ?? {}, uid(req)));
+}));
+
+// ── Acceso del apoderado al portal (enlace mágico) ────────────────────────────
+router.get('/pacientes/:id/acceso', gestionaPaciente, w(async (req, res) => {
+  res.json(await historiasRepo.getAccesoByPaciente(tid(req), Number(req.params.id)));
+}));
+
+router.post('/pacientes/:id/acceso', gestionaPaciente, w(async (req, res) => {
+  res.status(201).json(await historiasRepo.crearAcceso(tid(req), Number(req.params.id), uid(req)));
+}));
+
+router.post('/pacientes/:id/acceso/regenerar', gestionaPaciente, w(async (req, res) => {
+  res.status(201).json(await historiasRepo.regenerarAcceso(tid(req), Number(req.params.id), uid(req)));
+}));
+
+router.delete('/pacientes/:id/acceso', gestionaPaciente, w(async (req, res) => {
+  await historiasRepo.revocarAcceso(tid(req), Number(req.params.id));
+  res.status(204).send();
+}));
+
+// ── Tareas para casa ──────────────────────────────────────────────────────────
+router.get('/historias/:id/tareas', w(async (req, res) => {
+  res.json(await historiasRepo.listTareas(tid(req), Number(req.params.id)));
+}));
+
+router.post('/historias/:id/tareas', escribeClinico, w(async (req, res) => {
+  res.status(201).json(await historiasRepo.createTarea(tid(req), Number(req.params.id), req.body ?? {}, uid(req)));
+}));
+
+router.patch('/tareas/:id', escribeClinico, w(async (req, res) => {
+  const t = await historiasRepo.updateTarea(tid(req), Number(req.params.id), req.body ?? {});
+  if (!t) { res.status(404).json({ error: 'Tarea no encontrada' }); return; }
+  res.json(t);
+}));
+
+router.delete('/tareas/:id', escribeClinico, w(async (req, res) => {
+  const ok = await historiasRepo.deleteTarea(tid(req), Number(req.params.id));
+  if (!ok) { res.status(404).json({ error: 'Tarea no encontrada' }); return; }
+  res.status(204).send();
+}));
+
+/** Adjunta un AUDIO (mp3) o imagen a la tarea. Binario crudo, igual que adjuntos. */
+router.post('/tareas/:id/adjunto', escribeClinico, rawUpload, w(async (req, res) => {
+  const mime = String(req.headers['content-type'] || '');
+  let nombre = 'audio';
+  try { nombre = decodeURIComponent(String(req.headers['x-file-name'] || 'audio')); } catch { /* deja 'audio' */ }
+  const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? []);
+  const guardado = guardarAdjunto(buffer, mime, nombre, HC_SUBCARPETA);
+  if (!esRutaAdjuntoValida(guardado.ruta, HC_SUBCARPETA)) {
+    res.status(400).json({ error: 'No se pudo guardar el archivo' }); return;
+  }
+  const t = await historiasRepo.setTareaAdjunto(tid(req), Number(req.params.id),
+    { ruta: guardado.ruta, nombre: guardado.nombre, mime: guardado.mime });
+  if (!t) { res.status(404).json({ error: 'Tarea no encontrada' }); return; }
+  res.status(201).json(t);
+}));
+
+router.delete('/tareas/:id/adjunto', escribeClinico, w(async (req, res) => {
+  const t = await historiasRepo.setTareaAdjunto(tid(req), Number(req.params.id), null);
+  if (!t) { res.status(404).json({ error: 'Tarea no encontrada' }); return; }
+  res.json(t);
+}));
+
 // ── Sesiones / evoluciones ────────────────────────────────────────────────────
 router.get('/historias/:id/sesiones', w(async (req, res) => {
   res.json(await historiasRepo.listSesiones(tid(req), Number(req.params.id)));

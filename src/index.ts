@@ -23,6 +23,7 @@ import { authRoutes } from './modules/auth/auth.routes';
 import { backofficeRoutes } from './modules/backoffice/backoffice.routes';
 import { pacientesRoutes } from './modules/pacientes/pacientes.routes';
 import { historiasRoutes } from './modules/historias/historias.routes';
+import { historiasPublicRoutes } from './modules/historias/historias.public.routes';
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes';
 import { certificadosRoutes } from './modules/certificados/certificados.routes';
 import { publicCertificadosRoutes } from './modules/certificados/public/public.routes';
@@ -118,6 +119,9 @@ app.get(`${BASE_PATH}/public/certificado/:tenantSlug/:codigo`, publicLimiter,
 
 /** Libro de Reclamaciones Virtual — registro público (sin JWT ni tenant). */
 app.use(`${BASE_PATH}/public/reclamos`, publicLimiter, reclamosPublicRoutes);
+
+/** Portal de padres/apoderados — solo lectura por token (sin JWT ni tenant). */
+app.use(`${BASE_PATH}/public/portal`, publicLimiter, historiasPublicRoutes);
 
 /** Certificados: JWT + verificación de que el tenant del token == x-tenant-id */
 app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, certificadosRoutes);

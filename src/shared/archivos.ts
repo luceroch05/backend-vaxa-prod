@@ -21,6 +21,16 @@ const EXT_POR_MIME: Record<string, string> = {
   'image/webp': 'webp',
   'application/msword': 'doc',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+  // Audio (para las tareas para casa: audio modelo de pronunciación, etc.)
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/aac': 'aac',
+  'audio/ogg': 'ogg',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/webm': 'weba',
 };
 
 /** Tamaño máximo por archivo (bytes). */
@@ -72,7 +82,7 @@ export function guardarAdjunto(buffer: Buffer, mime: string, nombreOriginal: str
  * inyecte rutas arbitrarias.
  */
 export function esRutaAdjuntoValida(ruta: string, subcarpeta: string = SUBCARPETA): boolean {
-  const re = new RegExp(`^/uploads/${subcarpeta}/[a-f0-9]{24}\\.(pdf|png|jpg|webp|doc|docx)$`);
+  const re = new RegExp(`^/uploads/${subcarpeta}/[a-f0-9]{24}\\.(pdf|png|jpg|webp|doc|docx|mp3|m4a|aac|ogg|wav|weba)$`);
   if (!re.test(ruta || '')) return false;
   return fs.existsSync(path.join(process.cwd(), ruta.replace(/^\//, '')));
 }
