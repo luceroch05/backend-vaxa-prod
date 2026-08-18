@@ -95,6 +95,96 @@ export const catalogosRepo = {
   },
 };
 
+// ============================================================
+// CALIDADES DE PARTICIPACIÓN (catálogo por empresa)
+// La calidad guardada en inscripciones.calidad sigue siendo el NOMBRE (texto);
+// esta tabla solo administra/valida las opciones del desplegable (antes hardcode).
+// ============================================================
+export const calidadesRepo = {
+  async list(tenantSlug: string, incluirInactivas = false) {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT id, nombre, activo, orden FROM calidad_participacion
+        WHERE empresa_id = ?${incluirInactivas ? '' : ' AND activo = 1'}
+        ORDER BY orden, nombre`,
+      [empresaId],
+    );
+    return rows;
+  },
+
+  async create(tenantSlug: string, nombre: string) {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const nom = String(nombre ?? '').trim();
+    if (!nom) throw new Error('El nombre de la calidad es requerido.');
+    const [[{ maxOrden }]] = await pool().query<any[]>(
+      'SELECT COALESCE(MAX(orden), 0) AS maxOrden FROM calidad_participacion WHERE empresa_id = ?', [empresaId],
+    ) as any;
+    // Idempotente: si ya existe (mismo nombre) la reactiva en vez de duplicar.
+    await pool().query(
+      `INSERT INTO calidad_participacion (empresa_id, nombre, orden)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE activo = 1`,
+      [empresaId, nom, Number(maxOrden) + 1],
+    );
+    const [rows] = await pool().query<any[]>(
+      'SELECT id, nombre, activo, orden FROM calidad_participacion WHERE empresa_id = ? AND nombre = ? LIMIT 1',
+      [empresaId, nom],
+    );
+    return rows[0];
+  },
+
+  async update(tenantSlug: string, id: number, dto: { nombre?: string; activo?: boolean; orden?: number }) {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const campos: string[] = [];
+    const vals: any[] = [];
+    if (dto.nombre !== undefined) { campos.push('nombre = ?'); vals.push(String(dto.nombre).trim()); }
+    if (dto.activo !== undefined) { campos.push('activo = ?'); vals.push(dto.activo ? 1 : 0); }
+    if (dto.orden !== undefined)  { campos.push('orden = ?');  vals.push(Number(dto.orden)); }
+    if (!campos.length) return null;
+    vals.push(id, empresaId);
+    const [res] = await pool().query<any>(
+      `UPDATE calidad_participacion SET ${campos.join(', ')} WHERE id = ? AND empresa_id = ?`, vals,
+    );
+    if (!res.affectedRows) return null;
+    const [rows] = await pool().query<any[]>(
+      'SELECT id, nombre, activo, orden FROM calidad_participacion WHERE id = ? AND empresa_id = ?', [id, empresaId],
+    );
+    return rows[0] ?? null;
+  },
+
+  /** Garantiza que un NOMBRE de calidad exista en el catálogo de la empresa
+   *  (lo agrega si es nuevo). Se llama al inscribir/importar para que el catálogo
+   *  quede completo aunque el nombre haya llegado por Excel. No falla si ya existe. */
+  async asegurar(empresaId: number, nombre?: string | null): Promise<void> {
+    const nom = String(nombre ?? '').trim();
+    if (!nom || nom.toLowerCase() === 'participante') return;   // Participante siempre está sembrado
+    await pool().query(
+      `INSERT INTO calidad_participacion (empresa_id, nombre, orden)
+       VALUES (?, ?, 50)
+       ON DUPLICATE KEY UPDATE calidad_participacion.nombre = calidad_participacion.nombre`,
+      [empresaId, nom],
+    );
+  },
+
+  /** Asegura la calidad y devuelve su ID del catálogo (para el FK inscripciones.calidad_id).
+   *  Incluye 'Participante' (que está sembrado). Devuelve null si el nombre viene vacío. */
+  async resolverId(empresaId: number, nombre?: string | null): Promise<number | null> {
+    const nom = String(nombre ?? '').trim();
+    if (!nom) return null;
+    await pool().query(
+      `INSERT INTO calidad_participacion (empresa_id, nombre, orden)
+       VALUES (?, ?, 50)
+       ON DUPLICATE KEY UPDATE calidad_participacion.nombre = calidad_participacion.nombre`,
+      [empresaId, nom],
+    );
+    const [rows] = await pool().query<any[]>(
+      'SELECT id FROM calidad_participacion WHERE empresa_id = ? AND nombre = ? LIMIT 1',
+      [empresaId, nom],
+    );
+    return rows[0]?.id ?? null;
+  },
+};
+
 /** Se lanza cuando no se puede BORRAR algo por datos asociados. El controller la mapea a 409.
  *  (Hoy el borrado arrastra los certificados, así que normalmente no se usa; queda como
  *  red de seguridad para errores de integridad inesperados.) */
@@ -925,10 +1015,13 @@ export const inscripcionesRepo = {
     const dup = await inscripcionDuplicadaEnGrupo(empresaId, dto.participante_id, dto.grupo_id);
     if (dup) throw new Error('El estudiante ya está inscrito en este grupo.');
 
+    const calidadNom = dto.calidad?.trim() || 'Participante';
+    // Resuelve el id del catálogo (y lo agrega si es nuevo) → guarda texto + FK.
+    const calidadId = await calidadesRepo.resolverId(empresaId, calidadNom);
     const [result] = await pool().query<any>(
-      `INSERT INTO inscripciones (empresa_id, participante_id, grupo_id, estado_id, calidad, fecha_inscripcion, user_crea_id)
-       VALUES (?, ?, ?, 1, ?, ?, ?)`,
-      [empresaId, dto.participante_id, dto.grupo_id, (dto.calidad?.trim() || 'Participante'), dto.fecha_inscripcion, userId ?? null],
+      `INSERT INTO inscripciones (empresa_id, participante_id, grupo_id, estado_id, calidad, calidad_id, fecha_inscripcion, user_crea_id)
+       VALUES (?, ?, ?, 1, ?, ?, ?, ?)`,
+      [empresaId, dto.participante_id, dto.grupo_id, calidadNom, calidadId, dto.fecha_inscripcion, userId ?? null],
     );
     const [rows] = await pool().query<any[]>(
       `SELECT i.*, ei.nombre AS estado_nombre FROM inscripciones i
@@ -1162,9 +1255,10 @@ export const inscripcionesRepo = {
   async cambiarCalidad(tenantSlug: string, id: number, calidad: string, userId?: number): Promise<InscripcionEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
     const cal = String(calidad ?? '').trim() || 'Participante';
+    const calId = await calidadesRepo.resolverId(empresaId, cal);
     const [upd] = await pool().query<any>(
-      'UPDATE inscripciones SET calidad = ?, user_actua_id = ? WHERE id = ? AND empresa_id = ?',
-      [cal, userId ?? null, id, empresaId],
+      'UPDATE inscripciones SET calidad = ?, calidad_id = ?, user_actua_id = ? WHERE id = ? AND empresa_id = ?',
+      [cal, calId, userId ?? null, id, empresaId],
     );
     if (!upd.affectedRows) return null;
     const [rows] = await pool().query<any[]>(
@@ -1283,13 +1377,20 @@ export const inscripcionesRepo = {
 // ============================================================
 // LOGOS
 // ============================================================
-/** Planes cuyo logo de empresa (logo_url) es OBLIGATORIO en los certificados. */
+/** Planes cuyo logo de empresa (logo_url) es OBLIGATORIO en los certificados.
+ *  (ago 2026) El usuario pidió que sea obligatorio en TODOS los planes → `logoObligatorio()`
+ *  ya no filtra por plan; la lista se conserva por si se quiere volver a limitar. */
 export const PLANES_LOGO_DEFAULT = ['basico', 'profesional'];
+
+/** ¿El logo_url de la empresa es obligatorio? Hoy: en todos los planes si hay logo_url. */
+function logoObligatorio(logoUrl?: string | null, _planSlug?: string | null): boolean {
+  return !!logoUrl;   // antes: && PLANES_LOGO_DEFAULT.includes(_planSlug ?? '')
+}
 
 /**
  * Garantiza que exista (y esté sincronizado) el logo default de la empresa cuando
- * su plan lo exige (Básico/Profesional). Materializa empresas.logo_url como una
- * fila en `logos` con es_default=1. Si el plan NO lo exige, no hace nada.
+ * corresponde. Materializa empresas.logo_url como una fila en `logos` con es_default=1.
+ * Si no corresponde (empresa sin logo_url), desbloquea el default que hubiera.
  */
 async function ensureLogoDefault(empresaId: number): Promise<void> {
   const [emp] = await pool().query<any[]>(
@@ -1299,7 +1400,7 @@ async function ensureLogoDefault(empresaId: number): Promise<void> {
     [empresaId],
   );
   const row = (emp as any[])[0];
-  const aplica = !!row?.logo_url && PLANES_LOGO_DEFAULT.includes(row.plan_slug);
+  const aplica = logoObligatorio(row?.logo_url, row?.plan_slug);
   if (!aplica) {
     // El plan ya no exige logo obligatorio (ej. subió a Empresarial/Corporativo):
     // desbloquear el default que hubiera para que sea un logo normal (eliminable).
@@ -2216,9 +2317,6 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
     // Logos del cert. Logo DEFAULT obligatorio (planes Básico/Profesional): el
     // logo de la empresa (logo_url) SIEMPRE aparece, aunque la config no lo tenga
     // seleccionado — red de seguridad. Va primero (orden -1).
-    let logosDatos = (config?.logos ?? []).map((l: any) => ({
-      imagen: l.imagen_logo, nombre: l.nombre, orden: l.orden,
-    }));
     const [empLogoRows] = await pool().query<any[]>(
       `SELECT e.logo_url, pl.slug AS plan_slug
          FROM empresas e LEFT JOIN planes pl ON pl.id = e.plan_actual_id
@@ -2226,9 +2324,15 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       [tenantSlug],
     );
     const empLogo = (empLogoRows as any[])[0];
-    if (empLogo?.logo_url && PLANES_LOGO_DEFAULT.includes(empLogo.plan_slug)
-        && !logosDatos.some((l: any) => l.imagen === empLogo.logo_url)) {
-      logosDatos = [{ imagen: empLogo.logo_url, nombre: 'Logo de la empresa', orden: -1 }, ...logosDatos];
+    // El logo de la empresa (logo_url) es OBLIGATORIO en Básico/Profesional.
+    const urlOblig = logoObligatorio(empLogo?.logo_url, empLogo?.plan_slug) ? empLogo.logo_url : null;
+    let logosDatos = (config?.logos ?? []).map((l: any) => ({
+      imagen: l.imagen_logo, nombre: l.nombre, orden: l.orden,
+      es_default: !!urlOblig && l.imagen_logo === urlOblig,
+    }));
+    // Red de seguridad: si no está en la config seleccionada, se antepone (orden -1).
+    if (urlOblig && !logosDatos.some((l: any) => l.imagen === urlOblig)) {
+      logosDatos = [{ imagen: urlOblig, nombre: 'Logo de la empresa', orden: -1, es_default: true }, ...logosDatos];
     }
 
     return {
