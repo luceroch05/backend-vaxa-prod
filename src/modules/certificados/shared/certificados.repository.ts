@@ -1377,13 +1377,20 @@ export const inscripcionesRepo = {
 // ============================================================
 // LOGOS
 // ============================================================
-/** Planes cuyo logo de empresa (logo_url) es OBLIGATORIO en los certificados. */
+/** Planes cuyo logo de empresa (logo_url) es OBLIGATORIO en los certificados.
+ *  (ago 2026) El usuario pidió que sea obligatorio en TODOS los planes → `logoObligatorio()`
+ *  ya no filtra por plan; la lista se conserva por si se quiere volver a limitar. */
 export const PLANES_LOGO_DEFAULT = ['basico', 'profesional'];
+
+/** ¿El logo_url de la empresa es obligatorio? Hoy: en todos los planes si hay logo_url. */
+function logoObligatorio(logoUrl?: string | null, _planSlug?: string | null): boolean {
+  return !!logoUrl;   // antes: && PLANES_LOGO_DEFAULT.includes(_planSlug ?? '')
+}
 
 /**
  * Garantiza que exista (y esté sincronizado) el logo default de la empresa cuando
- * su plan lo exige (Básico/Profesional). Materializa empresas.logo_url como una
- * fila en `logos` con es_default=1. Si el plan NO lo exige, no hace nada.
+ * corresponde. Materializa empresas.logo_url como una fila en `logos` con es_default=1.
+ * Si no corresponde (empresa sin logo_url), desbloquea el default que hubiera.
  */
 async function ensureLogoDefault(empresaId: number): Promise<void> {
   const [emp] = await pool().query<any[]>(
@@ -1393,7 +1400,7 @@ async function ensureLogoDefault(empresaId: number): Promise<void> {
     [empresaId],
   );
   const row = (emp as any[])[0];
-  const aplica = !!row?.logo_url && PLANES_LOGO_DEFAULT.includes(row.plan_slug);
+  const aplica = logoObligatorio(row?.logo_url, row?.plan_slug);
   if (!aplica) {
     // El plan ya no exige logo obligatorio (ej. subió a Empresarial/Corporativo):
     // desbloquear el default que hubiera para que sea un logo normal (eliminable).
@@ -2310,9 +2317,6 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
     // Logos del cert. Logo DEFAULT obligatorio (planes Básico/Profesional): el
     // logo de la empresa (logo_url) SIEMPRE aparece, aunque la config no lo tenga
     // seleccionado — red de seguridad. Va primero (orden -1).
-    let logosDatos = (config?.logos ?? []).map((l: any) => ({
-      imagen: l.imagen_logo, nombre: l.nombre, orden: l.orden,
-    }));
     const [empLogoRows] = await pool().query<any[]>(
       `SELECT e.logo_url, pl.slug AS plan_slug
          FROM empresas e LEFT JOIN planes pl ON pl.id = e.plan_actual_id
@@ -2320,9 +2324,15 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       [tenantSlug],
     );
     const empLogo = (empLogoRows as any[])[0];
-    if (empLogo?.logo_url && PLANES_LOGO_DEFAULT.includes(empLogo.plan_slug)
-        && !logosDatos.some((l: any) => l.imagen === empLogo.logo_url)) {
-      logosDatos = [{ imagen: empLogo.logo_url, nombre: 'Logo de la empresa', orden: -1 }, ...logosDatos];
+    // El logo de la empresa (logo_url) es OBLIGATORIO en Básico/Profesional.
+    const urlOblig = logoObligatorio(empLogo?.logo_url, empLogo?.plan_slug) ? empLogo.logo_url : null;
+    let logosDatos = (config?.logos ?? []).map((l: any) => ({
+      imagen: l.imagen_logo, nombre: l.nombre, orden: l.orden,
+      es_default: !!urlOblig && l.imagen_logo === urlOblig,
+    }));
+    // Red de seguridad: si no está en la config seleccionada, se antepone (orden -1).
+    if (urlOblig && !logosDatos.some((l: any) => l.imagen === urlOblig)) {
+      logosDatos = [{ imagen: urlOblig, nombre: 'Logo de la empresa', orden: -1, es_default: true }, ...logosDatos];
     }
 
     return {

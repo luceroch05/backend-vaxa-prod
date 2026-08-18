@@ -17,6 +17,8 @@ export interface PdfLogo {
   imagen: string;        // base64 dataURL o ruta
   nombre?: string | null;
   orden: number;
+  /** true si es el logo OBLIGATORIO de la empresa (el de sistemas-vaxa, es_default). */
+  es_default?: boolean;
 }
 
 export interface PdfFirma {
@@ -397,6 +399,9 @@ async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrD
     fecha:        fmtFecha(datos.fecha_emision),
     fechaInicio:  fechaIni,
     fechaFin:     fechaFin,
+    // Frase del periodo, ya resuelta según los días: "el 22 de agosto de 2026",
+    // "los días 22, 23 y 24…" o "del X al Y". Evita el "al" colgando cuando no hay fecha fin.
+    periodo:      periodoFrase,
     // Mes + año de emisión, ej. "septiembre 2026" (para "Miraflores, {mesEmision}.").
     mesEmision:   (() => { const p = ymd(datos.fecha_emision); return p ? `${MESES_LARGO[p.m - 1]} ${p.y}` : ''; })(),
     codigo:       datos.codigo_unico,

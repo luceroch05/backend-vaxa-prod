@@ -72,6 +72,9 @@ export interface CampoLinea {
   w?:         number;
   thickness?: number;
   color?:     string;
+  /** Si apunta a la clave de un campo de texto, la línea toma su ancho y centro
+   *  horizontal (subrayado adaptado). Se ignoran x/w cuando está puesto. */
+  sigueA?:    string;
 }
 
 export interface LayoutLienzo {
@@ -270,6 +273,61 @@ function expandir(txt: string, vars: Record<string, string>): string {
   });
 }
 
+/* ── Negrita parcial: **texto** dentro de un campo ──────────────
+   Espejo de segmentosBold() del frontend (personalizado/layout.ts). */
+interface Run { text: string; bold: boolean; }
+
+/** true si el texto trae al menos una marca **negrita**. */
+const TIENE_NEGRITA = /\*\*[\s\S]+?\*\*/;
+
+/** Divide un texto en tramos normales / en negrita según las marcas **. */
+function segmentarBold(txt: string): Run[] {
+  const out: Run[] = [];
+  const re = /\*\*([\s\S]+?)\*\*/g;
+  let last = 0, m: RegExpExecArray | null;
+  while ((m = re.exec(txt))) {
+    if (m.index > last) out.push({ text: txt.slice(last, m.index), bold: false });
+    out.push({ text: m[1], bold: true });
+    last = m.index + m[0].length;
+  }
+  if (last < txt.length) out.push({ text: txt.slice(last), bold: false });
+  return out;
+}
+
+/** Segmenta y además parte por saltos de línea → una lista de runs por línea. */
+function segmentarLineas(txt: string): Run[][] {
+  const lineas: Run[][] = [[]];
+  for (const r of segmentarBold(txt)) {
+    const partes = r.text.split('\n');
+    partes.forEach((p, i) => {
+      if (i > 0) lineas.push([]);
+      if (p) lineas[lineas.length - 1].push({ text: p, bold: r.bold });
+    });
+  }
+  return lineas;
+}
+
+/** Ancho (en puntos PDF) del texto de un campo, aplicando su auto-ajuste.
+ *  Se usa para el subrayado adaptado (línea que sigue a un texto). */
+function anchoTextoCampo(doc: any, c: CampoTexto, vars: Record<string, string>, reg: FuentesReg, PX: number): number {
+  let txt = expandir(c.text ?? '', vars).replace(/\*\*/g, '');
+  if (c.uppercase) txt = txt.toUpperCase();
+  if (!txt.trim()) return 0;
+  const trackPx = (c.tracking ?? 0) * PX;
+  const lineas = txt.split('\n');
+  doc.font(fontFor(c.bold, c.italic, c.font, reg, c.weight));
+  const anchoAt = (s: number): number => {
+    doc.fontSize(s);
+    return Math.max(0, ...lineas.map(l => doc.widthOfString(l) + trackPx * Math.max(0, l.length - 1)));
+  };
+  let size = (c.size ?? 20) * PX;
+  if (c.autoFit) {
+    const maxW = (c.w ?? 400) * PX;
+    while (size > 8 * PX) { if (anchoAt(size) <= maxW) break; size -= 1; }
+  }
+  return anchoAt(size);
+}
+
 /* ── Render del lienzo ──────────────────────────────────────── */
 /**
  * Dibuja el certificado en modo personalizado: fondo del cliente + campos
@@ -339,12 +397,26 @@ export function pintarLienzo(
       continue;
     }
 
-    // LÍNEA decorativa
+    // LÍNEA decorativa (opcionalmente subrayado adaptado al ancho de un texto)
     if (/^linea/i.test(key)) {
       const c = raw as CampoLinea;
-      const lx = (c.x ?? 0) * PX;
       const ly = (c.y ?? 0) * PX;
-      const lw = (c.w ?? 200) * PX;
+      let lx = (c.x ?? 0) * PX;
+      let lw = (c.w ?? 200) * PX;
+      // ¿Sigue a un texto? Toma su ancho y su centro horizontal.
+      const obj = c.sigueA ? (campos as Record<string, any>)[c.sigueA] : undefined;
+      const objEsTexto = c.sigueA && !/^logo\d+$/i.test(c.sigueA) && !/^firma\d+$/i.test(c.sigueA) && !/^linea/i.test(c.sigueA) && c.sigueA !== 'qr';
+      if (obj && objEsTexto) {
+        const t = obj as CampoTexto;
+        const tw = anchoTextoCampo(doc, t, vars, reg, PX);
+        if (tw > 0) {
+          const boxX = (t.x ?? 0) * PX, boxW = (t.w ?? 400) * PX;
+          lx = t.align === 'left'  ? boxX
+             : t.align === 'right' ? boxX + boxW - tw
+             :                       boxX + (boxW - tw) / 2;
+          lw = tw;
+        }
+      }
       doc.moveTo(lx, ly).lineTo(lx + lw, ly)
         .lineWidth((c.thickness ?? 1.5) * PX).strokeColor(c.color ?? '#c9a24b').stroke();
       continue;
@@ -374,10 +446,57 @@ export function pintarLienzo(
     const c = raw as CampoTexto;
     let txt = expandir(c.text ?? '', vars);
     if (c.uppercase) txt = txt.toUpperCase();
-    if (!txt.trim()) continue;
+    if (!txt.replace(/\*\*/g, '').trim()) continue;
 
     const trackPx = (c.tracking ?? 0) * PX;
     const maxW    = (c.w ?? 400) * PX;
+
+    // ── Con **negrita** parcial: se dibuja run por run, línea por línea, para
+    //    mezclar pesos en un mismo renglón (pdfkit no alinea bien texto "continued").
+    if (TIENE_NEGRITA.test(txt)) {
+      const fontNorm = fontFor(c.bold, c.italic, c.font, reg, c.weight);
+      const fontBold = fontFor(true, c.italic, c.font, reg, (c.weight && c.weight > 700) ? c.weight : 700);
+      const lineas = segmentarLineas(txt);
+
+      // Ancho de una línea sumando cada run con su propia fuente (+ tracking).
+      const anchoLinea = (runs: Run[], s: number): number => {
+        let w = 0;
+        for (const r of runs) {
+          doc.font(r.bold ? fontBold : fontNorm).fontSize(s);
+          w += doc.widthOfString(r.text) + trackPx * r.text.length;
+        }
+        return w;
+      };
+
+      // Auto-ajuste: encoge hasta que la línea más ancha entre en `w`.
+      let size = (c.size ?? 20) * PX;
+      if (c.autoFit) {
+        while (size > 8 * PX) {
+          const w = Math.max(0, ...lineas.map(l => anchoLinea(l, size)));
+          if (w <= maxW) break;
+          size -= 1;
+        }
+      }
+
+      doc.font(fontNorm).fontSize(size).fillColor(c.color ?? '#0f172a');
+      const lineH = doc.currentLineHeight() + 2;
+      let y = (c.y ?? 0) * PX;
+      const x0 = (c.x ?? 0) * PX;
+      for (const runs of lineas) {
+        const lineW = anchoLinea(runs, size);
+        let x = x0;
+        if ((c.align ?? 'center') === 'center') x = x0 + (maxW - lineW) / 2;
+        else if (c.align === 'right')           x = x0 + (maxW - lineW);
+        for (const r of runs) {
+          doc.font(r.bold ? fontBold : fontNorm).fontSize(size);
+          doc.text(r.text, x, y, { lineBreak: false, characterSpacing: trackPx });
+          x += doc.widthOfString(r.text) + trackPx * r.text.length;
+        }
+        y += lineH;
+      }
+      continue;
+    }
+
     doc.font(fontFor(c.bold, c.italic, c.font, reg, c.weight));
 
     // Auto-ajuste: encoge el tamaño hasta que entre en una línea dentro de `w`.
@@ -400,5 +519,25 @@ export function pintarLienzo(
         lineGap: 2,
         characterSpacing: trackPx,
       });
+  }
+
+  // ── LOGO OBLIGATORIO de la empresa (es_default): SIEMPRE debe salir ──
+  // No se puede ocultar. Si su slot no está en el layout o quedó apagado, se dibuja
+  // igual: con la posición/tamaño del slot si existe, o en la esquina superior
+  // derecha por defecto. El slot 'logoN' se mapea por el orden de datos.logos.
+  const defIdx = datos.logos.findIndex((l) => l.es_default);
+  if (defIdx >= 0) {
+    const slot = campos[`logo${defIdx + 1}`] as CampoLogo | undefined;
+    const yaDibujado = !!slot && slot.on !== false;   // el loop ya lo pintó
+    if (!yaDibujado) {
+      const img = imagenABuffer(datos.logos[defIdx].imagen);
+      if (img) {
+        const size = (slot?.size ?? 110) * PX;
+        const x    = (slot?.x ?? 972) * PX;
+        const y    = (slot?.y ?? 30) * PX;
+        try { doc.image(img.data, x, y, { fit: [size, size], align: 'center', valign: 'center' }); }
+        catch (e) { console.warn('[lienzo] Error logo obligatorio:', (e as Error).message); }
+      }
+    }
   }
 }
