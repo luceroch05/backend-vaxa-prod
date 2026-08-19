@@ -19,13 +19,13 @@ export function getPool(): mysql.Pool | null {
     password: process.env.MYSQL_PASSWORD ?? '',
     database,
     waitForConnections: true,
-    // Hosting compartido limita las conexiones por usuario (max_user_connections).
-    // Passenger corre varios workers, cada uno con su pool, así que el límite por
-    // pool debe ser bajo y las conexiones ociosas se cierran pronto para dejar
-    // cupo a phpMyAdmin / cron. (pool_por_worker × workers + margen < max_user_connections)
-    connectionLimit: 5,
-    maxIdle: 1,
-    idleTimeout: 30000,   // cierra conexiones ociosas a los 30s
+    // Varias apps comparten el mismo usuario MySQL. Pool moderado + cierre de
+    // conexiones ociosas para no acumularlas (el servidor aguanta max_connections=500).
+    // Mismo criterio en las 3 apps (resqopet, podología, este). Como es un techo,
+    // no gasta nada hasta que se usa, y maxIdle/idleTimeout lo encogen en reposo.
+    connectionLimit: 10,
+    maxIdle: 2,
+    idleTimeout: 60000,   // cierra conexiones ociosas al minuto
     queueLimit: 0,
     charset: 'utf8mb4',
   });
