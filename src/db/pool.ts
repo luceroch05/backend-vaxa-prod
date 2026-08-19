@@ -19,7 +19,13 @@ export function getPool(): mysql.Pool | null {
     password: process.env.MYSQL_PASSWORD ?? '',
     database,
     waitForConnections: true,
+    // Varias apps comparten el mismo usuario MySQL. Pool moderado + cierre de
+    // conexiones ociosas para no acumularlas (el servidor aguanta max_connections=500).
+    // Mismo criterio en las 3 apps (resqopet, podología, este). Como es un techo,
+    // no gasta nada hasta que se usa, y maxIdle/idleTimeout lo encogen en reposo.
     connectionLimit: 10,
+    maxIdle: 2,
+    idleTimeout: 60000,   // cierra conexiones ociosas al minuto
     queueLimit: 0,
     charset: 'utf8mb4',
   });
