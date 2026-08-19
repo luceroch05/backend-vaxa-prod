@@ -533,7 +533,7 @@ export const notasRepo = {
 
     const [insc] = await pool().query<any[]>(
       `SELECT i.id AS inscripcion_id, i.estado_id,
-              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+              CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento, ei.nombre AS estado_nombre
        FROM inscripciones i
        JOIN participantes p       ON p.id = i.participante_id
@@ -635,7 +635,7 @@ export const notasRepo = {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT i.id AS inscripcion_id, i.empresa_id, i.estado_id, ei.nombre AS estado_nombre,
-              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre, p.numero_documento,
+              CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre, p.numero_documento,
               g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3,
               prog.id AS programa_id, prog.nombre AS programa_nombre,
               prog.unidad_label, prog.nota_minima, prog.horas_academicas,
@@ -988,7 +988,7 @@ export const inscripcionesRepo = {
     const empresaId = await getEmpresaId(tenantSlug);
     const base = `
       SELECT i.*,
-             CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+             CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre,
              p.numero_documento, g.nombre_grupo, prog.nombre AS programa_nombre,
              ei.nombre AS estado_nombre
       FROM inscripciones i
@@ -1229,7 +1229,7 @@ export const inscripcionesRepo = {
     );
     if (!upd.affectedRows) return null;
     const [rows] = await pool().query<any[]>(
-      `SELECT i.*, CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+      `SELECT i.*, CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento, g.nombre_grupo, prog.nombre AS programa_nombre, ei.nombre AS estado_nombre
        FROM inscripciones i
        JOIN participantes p       ON p.id  = i.participante_id
@@ -1262,7 +1262,7 @@ export const inscripcionesRepo = {
     );
     if (!upd.affectedRows) return null;
     const [rows] = await pool().query<any[]>(
-      `SELECT i.*, CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+      `SELECT i.*, CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento, g.nombre_grupo, prog.nombre AS programa_nombre, ei.nombre AS estado_nombre
        FROM inscripciones i
        JOIN participantes p       ON p.id  = i.participante_id
@@ -1758,7 +1758,7 @@ export const emisionRepo = {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT c.*, prog.id AS programa_id,
-              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+              CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento,
               prog.nombre AS programa_nombre,
               prog.horas_academicas, prog.creditos,
@@ -1825,7 +1825,7 @@ export const emisionRepo = {
   async _cargarCertCompleto(certId: number): Promise<any> {
     const [rows] = await pool().query<any[]>(
       `SELECT c.*, prog.id AS programa_id,
-              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+              CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento,
               prog.nombre AS programa_nombre,
               prog.horas_academicas, prog.creditos,
@@ -1963,7 +1963,7 @@ export const emisionRepo = {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT c.*, prog.id AS programa_id,
-              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+              CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento,
               prog.nombre AS programa_nombre,
               prog.horas_academicas, prog.creditos,
@@ -1994,7 +1994,7 @@ export const emisionRepo = {
     const [rows] = await pool().query<any[]>(
       `SELECT i.id AS inscripcion_id, i.empresa_id, i.grupo_id,
               prog.id AS programa_id,
-              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+              CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento,
               prog.nombre AS programa_nombre,
               prog.horas_academicas, prog.creditos,
@@ -2038,7 +2038,7 @@ export const emisionRepo = {
   async validarPublico(codigoUnico: string, tenantSlug: string): Promise<CertificadoPublicoEntity | null> {
     const [rows] = await pool().query<any[]>(
       `SELECT c.codigo_unico, c.fecha_emision, c.url,
-              CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre,
+              CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre,
               p.numero_documento, td.codigo AS tipo_doc,
               prog.nombre AS programa_nombre, prog.horas_academicas,
               tp.nombre AS tipo_programa,
@@ -2155,7 +2155,7 @@ export const emisionRepo = {
     `SELECT
         c.url,
         c.codigo_unico,
-        CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre
+        CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre
      FROM certificados c
      INNER JOIN inscripciones i
         ON i.id = c.inscripcion_id
@@ -2186,7 +2186,7 @@ async zipPorIds(tenantSlug: string, ids: number[]): Promise<Buffer | null> {
 
   const [rows] = await pool().query<any[]>(
     `SELECT c.url, c.codigo_unico,
-            CONCAT(p.nombres,' ',p.apellidos) AS participante_nombre
+            CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre
      FROM certificados c
      INNER JOIN inscripciones i ON i.id = c.inscripcion_id
      INNER JOIN participantes p ON p.id = i.participante_id
