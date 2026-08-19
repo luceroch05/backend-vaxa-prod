@@ -24,6 +24,7 @@ import { backofficeRoutes } from './modules/backoffice/backoffice.routes';
 import { pacientesRoutes } from './modules/pacientes/pacientes.routes';
 import { historiasRoutes } from './modules/historias/historias.routes';
 import { historiasPublicRoutes } from './modules/historias/historias.public.routes';
+import { webRoutes, webPublicRoutes } from './modules/web/web.routes';
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes';
 import { certificadosRoutes } from './modules/certificados/certificados.routes';
 import { publicCertificadosRoutes } from './modules/certificados/public/public.routes';
@@ -79,7 +80,9 @@ app.use(cors({
     // Sin Origin (curl, apps móviles, same-origin) → permitir.
     if (!origin) return callback(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    if (!IS_PROD && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+    // En dev: localhost/127.0.0.1 y también «<slug>.lvh.me» (resuelve a 127.0.0.1),
+    // para probar en local los dominios propios de cliente (historias clínicas).
+    if (!IS_PROD && /^http:\/\/(([a-z0-9-]+\.)*lvh\.me|localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
       return callback(null, true);
     }
     // Origen NO permitido: se deniega sin lanzar Error. Lanzar aquí hace que
@@ -123,12 +126,18 @@ app.use(`${BASE_PATH}/public/reclamos`, publicLimiter, reclamosPublicRoutes);
 /** Portal de padres/apoderados — solo lectura por token (sin JWT ni tenant). */
 app.use(`${BASE_PATH}/public/portal`, publicLimiter, historiasPublicRoutes);
 
+/** Web pública editable (landing del cliente) — lectura por tenant (sin JWT ni tenant middleware). */
+app.use(`${BASE_PATH}/public/web`, publicLimiter, webPublicRoutes);
+
 /** Certificados: JWT + verificación de que el tenant del token == x-tenant-id */
 app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, certificadosRoutes);
 
 /** Historias Clínicas (centros terapéuticos): mismo stack que certificados —
  *  JWT + tenant del token == x-tenant-id + bloqueo por vencimiento de pago. */
 app.use(`${BASE_PATH}/api/historias`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, historiasRoutes);
+
+/** Módulo "Mi Web" (contenido de la web pública editable): mismo stack que historias. */
+app.use(`${BASE_PATH}/api/web`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, webRoutes);
 
 /** Administración Vaxa: JWT + solo tenant raíz (créditos, empresas y usuarios de todas las empresas) */
 app.use(`${BASE_PATH}/api/admin/creditos`,      jwtMiddleware, requireRootTenant, creditosAdminRoutes);
