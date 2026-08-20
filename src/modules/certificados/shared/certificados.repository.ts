@@ -74,6 +74,26 @@ async function ensureLayoutBase(): Promise<void> {
   }
   _ensuredLayoutBase = true;
 }
+
+/**
+ * Auto-sana la columna `empresas.logo_cert_url` (logo OBLIGATORIO del certificado,
+ * una imagen dedicada que Vaxa asigna a cada cliente, SEPARADA del `logo_url` que
+ * se sube al registrar la empresa). Si está vacía, el obligatorio cae al `logo_url`.
+ * Se crea sola si la migración no corrió en prod.
+ */
+let _ensuredLogoCert = false;
+async function ensureLogoCert(): Promise<void> {
+  if (_ensuredLogoCert) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'empresas'
+        AND COLUMN_NAME = 'logo_cert_url' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query(`ALTER TABLE empresas ADD COLUMN logo_cert_url MEDIUMTEXT NULL AFTER logo_url`);
+  }
+  _ensuredLogoCert = true;
+}
 import archiver = require('archiver');
 import { PassThrough } from 'stream';
 // ============================================================
@@ -1393,14 +1413,18 @@ function logoObligatorio(logoUrl?: string | null, _planSlug?: string | null): bo
  * Si no corresponde (empresa sin logo_url), desbloquea el default que hubiera.
  */
 async function ensureLogoDefault(empresaId: number): Promise<void> {
+  await ensureLogoCert();
   const [emp] = await pool().query<any[]>(
-    `SELECT e.logo_url, pl.slug AS plan_slug
+    `SELECT e.logo_url, e.logo_cert_url, pl.slug AS plan_slug
        FROM empresas e LEFT JOIN planes pl ON pl.id = e.plan_actual_id
       WHERE e.id = ? LIMIT 1`,
     [empresaId],
   );
   const row = (emp as any[])[0];
-  const aplica = logoObligatorio(row?.logo_url, row?.plan_slug);
+  // Fuente del logo obligatorio: la imagen dedicada que Vaxa asigna para el
+  // certificado (logo_cert_url); si no la asignó, cae al logo de registro (logo_url).
+  const src: string | null = row?.logo_cert_url || row?.logo_url || null;
+  const aplica = logoObligatorio(src, row?.plan_slug);
   if (!aplica) {
     // El plan ya no exige logo obligatorio (ej. subió a Empresarial/Corporativo):
     // desbloquear el default que hubiera para que sea un logo normal (eliminable).
@@ -1413,15 +1437,15 @@ async function ensureLogoDefault(empresaId: number): Promise<void> {
     [empresaId],
   );
   if ((exist as any[]).length) {
-    // Mantenerlo sincronizado si Vaxa cambió el logo de la empresa.
-    if (exist[0].imagen_logo !== row.logo_url) {
-      await pool().query('UPDATE logos SET imagen_logo = ? WHERE id = ?', [row.logo_url, exist[0].id]);
+    // Mantenerlo sincronizado si Vaxa cambió el logo del certificado (o el de registro).
+    if (exist[0].imagen_logo !== src) {
+      await pool().query('UPDATE logos SET imagen_logo = ? WHERE id = ?', [src, exist[0].id]);
     }
     return;
   }
   await pool().query(
     `INSERT INTO logos (empresa_id, nombre, imagen_logo, es_default) VALUES (?, 'Logo de la empresa', ?, 1)`,
-    [empresaId, row.logo_url],
+    [empresaId, src],
   );
 }
 
@@ -2317,15 +2341,18 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
     // Logos del cert. Logo DEFAULT obligatorio (planes Básico/Profesional): el
     // logo de la empresa (logo_url) SIEMPRE aparece, aunque la config no lo tenga
     // seleccionado — red de seguridad. Va primero (orden -1).
+    await ensureLogoCert();
     const [empLogoRows] = await pool().query<any[]>(
-      `SELECT e.logo_url, pl.slug AS plan_slug
+      `SELECT e.logo_url, e.logo_cert_url, pl.slug AS plan_slug
          FROM empresas e LEFT JOIN planes pl ON pl.id = e.plan_actual_id
         WHERE e.tenant_slug = ? LIMIT 1`,
       [tenantSlug],
     );
     const empLogo = (empLogoRows as any[])[0];
-    // El logo de la empresa (logo_url) es OBLIGATORIO en Básico/Profesional.
-    const urlOblig = logoObligatorio(empLogo?.logo_url, empLogo?.plan_slug) ? empLogo.logo_url : null;
+    // Logo obligatorio: la imagen dedicada del certificado (logo_cert_url) que Vaxa
+    // asigna; si no la asignó, cae al logo de registro (logo_url). Obligatorio en todos los planes.
+    const empLogoSrc: string | null = empLogo?.logo_cert_url || empLogo?.logo_url || null;
+    const urlOblig = logoObligatorio(empLogoSrc, empLogo?.plan_slug) ? empLogoSrc : null;
     let logosDatos = (config?.logos ?? []).map((l: any) => ({
       imagen: l.imagen_logo, nombre: l.nombre, orden: l.orden,
       es_default: !!urlOblig && l.imagen_logo === urlOblig,
