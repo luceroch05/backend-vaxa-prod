@@ -56,13 +56,34 @@ async function ensurePrecioCertificado(): Promise<void> {
   _ensuredPrecioCert = true;
 }
 
+/**
+ * Auto-sana la columna `empresas.logo_cert_url` (logo OBLIGATORIO del certificado:
+ * una imagen dedicada que Vaxa asigna a cada cliente, SEPARADA del `logo_url` que se
+ * sube al registrar la empresa). Si está vacía, el obligatorio cae al `logo_url`.
+ * Se crea sola al operar empresas, así no hace falta migración manual.
+ */
+let _ensuredLogoCert = false;
+async function ensureLogoCert(): Promise<void> {
+  if (_ensuredLogoCert) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'empresas'
+        AND COLUMN_NAME = 'logo_cert_url' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query(`ALTER TABLE empresas ADD COLUMN logo_cert_url MEDIUMTEXT NULL AFTER logo_url`);
+  }
+  _ensuredLogoCert = true;
+}
+
 export interface CrearEmpresaDto {
   razon_social: string;
   tenant_slug?: string;
   dominio?: string;
   ruc?: string;
   tipo_doc?: string;        // cat.06: '6' RUC (default) · '1' DNI · '4' CE · '7' pasaporte
-  logo?: string;            // data URL base64
+  logo?: string;            // data URL base64 — logo de registro de la empresa
+  logo_cert?: string;       // data URL base64 — logo OBLIGATORIO dedicado al certificado (Vaxa lo asigna)
   plan_id?: number;         // plan con el que arranca (default: Básico)
   ciclo_id?: number;        // ciclo de facturación (default: mensual)
   precio_certificado?: number; // solo modo "Pago por certificado": S/ por cert emitido (default 20)
@@ -75,7 +96,8 @@ export interface EditarEmpresaDto {
   dominio?: string;
   ruc?: string;
   tipo_doc?: string;
-  logo?: string;            // data URL base64; '' para quitar
+  logo?: string;            // data URL base64; '' para quitar — logo de registro de la empresa
+  logo_cert?: string;       // data URL base64; '' para quitar — logo dedicado del certificado (Vaxa)
   activo?: boolean;
   permite_diseno?: boolean; // servicio a medida (Lienzo) que activa Vaxa por empresa
   precio_certificado?: number; // solo modo "Pago por certificado": S/ por cert emitido
@@ -104,8 +126,9 @@ export const adminRepo = {
   async listEmpresas() {
     await ensurePermiteDiseno();
     await ensurePrecioCertificado();
+    await ensureLogoCert();
     const [rows] = await pool().query<any[]>(
-      `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo,
+      `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, logo_cert_url, activo,
               permite_diseno, precio_certificado,
               creditos_disponibles, creditos_asignados_total,
               (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
@@ -118,6 +141,7 @@ export const adminRepo = {
   async updateEmpresa(id: number, dto: EditarEmpresaDto) {
     await ensurePermiteDiseno();
     await ensurePrecioCertificado();
+    await ensureLogoCert();
     const [exist] = await pool().query<any[]>('SELECT id FROM empresas WHERE id = ? LIMIT 1', [id]);
     if (!(exist as any[]).length) throw new Error('Empresa no encontrada');
 
@@ -139,6 +163,8 @@ export const adminRepo = {
     if (dto.ruc !== undefined)     { fields.push('ruc = ?');     values.push(dto.ruc.trim() || null); }
     if (dto.tipo_doc !== undefined){ fields.push('tipo_doc = ?'); values.push(dto.tipo_doc || '6'); }
     if (dto.logo !== undefined)    { fields.push('logo_url = ?'); values.push(guardarImagen(dto.logo, 'empresas') || null); }
+    // Logo dedicado del certificado (obligatorio). '' o null lo quita → cae al logo de registro.
+    if (dto.logo_cert !== undefined) { fields.push('logo_cert_url = ?'); values.push(guardarImagen(dto.logo_cert, 'empresas') || null); }
     if (dto.activo !== undefined)  { fields.push('activo = ?');  values.push(dto.activo ? 1 : 0); }
     if (dto.permite_diseno !== undefined) { fields.push('permite_diseno = ?'); values.push(dto.permite_diseno ? 1 : 0); }
     // Precio por certificado (modo "Pago por certificado"). Debe ser > 0; solo aplica
@@ -155,7 +181,7 @@ export const adminRepo = {
     }
 
     const [rows] = await pool().query<any[]>(
-      `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo,
+      `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, logo_cert_url, activo,
               permite_diseno, precio_certificado,
               creditos_disponibles, creditos_asignados_total,
               (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
@@ -228,6 +254,7 @@ export const adminRepo = {
   /** Crea una empresa nueva. Genera slug si no se pasa y valida unicidad. */
   async crearEmpresa(dto: CrearEmpresaDto, userId?: number) {
     await ensurePermiteDiseno();
+    await ensureLogoCert();
     const razon = dto.razon_social?.trim();
     if (!razon) throw new Error('La razón social es requerida');
 
@@ -246,8 +273,8 @@ export const adminRepo = {
     }
 
     const [res] = await pool().query<any>(
-      `INSERT INTO empresas (razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, activo, permite_diseno) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-      [razon, slug, dto.dominio?.trim() || null, dto.ruc?.trim() || null, dto.tipo_doc || '6', guardarImagen(dto.logo, 'empresas') || null, dto.permite_diseno ? 1 : 0],
+      `INSERT INTO empresas (razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, logo_cert_url, activo, permite_diseno) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      [razon, slug, dto.dominio?.trim() || null, dto.ruc?.trim() || null, dto.tipo_doc || '6', guardarImagen(dto.logo, 'empresas') || null, guardarImagen(dto.logo_cert, 'empresas') || null, dto.permite_diseno ? 1 : 0],
     );
     const empresaId = res.insertId as number;
 

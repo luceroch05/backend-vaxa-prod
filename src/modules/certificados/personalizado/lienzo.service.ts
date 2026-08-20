@@ -37,6 +37,12 @@ export interface CampoTexto {
   weight?:    400 | 500 | 600 | 700 | 800;
   tracking?:  number;
   autoFit?:   boolean;
+  /** Dibuja una línea DEBAJO del texto (tipo "línea del nombre"), separada del
+   *  texto (no pegada como un subrayado normal). El ancho sigue al del texto. */
+  underline?:          boolean;
+  underlineColor?:     string;  // #hex (default: el color del texto)
+  underlineOffset?:    number;  // px de separación entre el texto y la línea (default 6)
+  underlineThickness?: number;  // px de grosor (default 1.5)
 }
 
 export interface CampoQR {
@@ -328,6 +334,32 @@ function anchoTextoCampo(doc: any, c: CampoTexto, vars: Record<string, string>, 
   return anchoAt(size);
 }
 
+/** Dibuja la LÍNEA DEBAJO del texto (opción `underline` del campo): del ancho del
+ *  texto, alineada como él y separada por `underlineOffset`. `sizePt` es el tamaño
+ *  final en puntos (ya con auto-ajuste aplicado). Espejo de LienzoCampos del front. */
+function dibujarSubrayado(
+  doc: any, c: CampoTexto, sizePt: number, vars: Record<string, string>, reg: FuentesReg, PX: number,
+): void {
+  if (!c.underline) return;
+  let txt = expandir(c.text ?? '', vars).replace(/\*\*/g, '');
+  if (c.uppercase) txt = txt.toUpperCase();
+  if (!txt.trim()) return;
+  const trackPx = (c.tracking ?? 0) * PX;
+  const lineas = txt.split('\n');
+  doc.font(fontFor(c.bold, c.italic, c.font, reg, c.weight)).fontSize(sizePt);
+  const tw = Math.max(0, ...lineas.map(l => doc.widthOfString(l) + trackPx * Math.max(0, l.length - 1)));
+  if (tw <= 0) return;
+  const boxX = (c.x ?? 0) * PX, boxW = (c.w ?? 400) * PX;
+  const lx = c.align === 'left'  ? boxX
+           : c.align === 'right' ? boxX + boxW - tw
+           :                       boxX + (boxW - tw) / 2;   // center (default)
+  const bottom = (c.y ?? 0) * PX + lineas.length * sizePt * 1.2;   // borde inferior del texto
+  const uy = bottom + (c.underlineOffset ?? 6) * PX;
+  doc.moveTo(lx, uy).lineTo(lx + tw, uy)
+    .lineWidth((c.underlineThickness ?? 1.5) * PX)
+    .strokeColor(c.underlineColor ?? c.color ?? '#0f172a').stroke();
+}
+
 /* ── Render del lienzo ──────────────────────────────────────── */
 /**
  * Dibuja el certificado en modo personalizado: fondo del cliente + campos
@@ -494,6 +526,7 @@ export function pintarLienzo(
         }
         y += lineH;
       }
+      dibujarSubrayado(doc, c, size, vars, reg, PX);
       continue;
     }
 
@@ -519,6 +552,7 @@ export function pintarLienzo(
         lineGap: 2,
         characterSpacing: trackPx,
       });
+    dibujarSubrayado(doc, c, size, vars, reg, PX);
   }
 
   // ── LOGO OBLIGATORIO de la empresa (es_default): SIEMPRE debe salir ──
