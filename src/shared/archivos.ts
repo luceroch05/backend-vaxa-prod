@@ -31,10 +31,20 @@ const EXT_POR_MIME: Record<string, string> = {
   'audio/wav': 'wav',
   'audio/x-wav': 'wav',
   'audio/webm': 'weba',
+  // Video propio corto (tareas para casa: modelo de un ejercicio, etc.). Se mantiene
+  // un tope BAJO a propósito para no llenar el disco del VPS ni cargar la CPU sirviéndolo;
+  // para videos largos se usa un enlace de YouTube (no pesa nada en el servidor).
+  'video/mp4': 'mp4',
+  'video/webm': 'webm',
+  'video/ogg': 'ogv',
+  'video/quicktime': 'mov',
 };
 
 /** Tamaño máximo por archivo (bytes). */
 export const ADJUNTO_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+/** Tope para el VIDEO propio de una tarea (más alto que un adjunto normal, pero
+ *  contenido para cuidar el disco/CPU del VPS; los videos largos van por YouTube). */
+export const TAREA_VIDEO_MAX_BYTES = 40 * 1024 * 1024; // 40 MB
 
 const SUBCARPETA = 'reclamos';
 
@@ -54,12 +64,12 @@ function sanitizarNombre(nombre: string, ext: string): string {
 /** Escribe el buffer como archivo adjunto y devuelve su metadata. Valida MIME y tamaño.
  *  `subcarpeta` permite reutilizar el mismo guardado en otros módulos (p. ej. 'hc'
  *  para historias clínicas); por defecto usa la de reclamos. */
-export function guardarAdjunto(buffer: Buffer, mime: string, nombreOriginal: string, subcarpeta: string = SUBCARPETA): AdjuntoGuardado {
+export function guardarAdjunto(buffer: Buffer, mime: string, nombreOriginal: string, subcarpeta: string = SUBCARPETA, maxBytes: number = ADJUNTO_MAX_BYTES): AdjuntoGuardado {
   const tipo = String(mime || '').toLowerCase().split(';')[0].trim();
   const ext = EXT_POR_MIME[tipo];
-  if (!ext) throw new AppError('Tipo de archivo no permitido. Adjunta PDF, imagen (JPG/PNG) o Word.', 400);
+  if (!ext) throw new AppError('Tipo de archivo no permitido. Adjunta PDF, imagen (JPG/PNG), Word, audio o video (MP4).', 400);
   if (!buffer?.length) throw new AppError('El archivo está vacío.', 400);
-  if (buffer.length > ADJUNTO_MAX_BYTES) throw new AppError('El archivo supera el máximo de 10 MB.', 400);
+  if (buffer.length > maxBytes) throw new AppError(`El archivo supera el máximo de ${Math.round(maxBytes / (1024 * 1024))} MB.`, 400);
 
   const hash = crypto.createHash('sha1').update(buffer).digest('hex').slice(0, 24);
   const dir = path.join(UPLOADS_DIR, subcarpeta);

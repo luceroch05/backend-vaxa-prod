@@ -3,12 +3,14 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { historiasRepo } from './historias.repository';
 import { sendError } from '../../shared/errors';
-import { guardarAdjunto, esRutaAdjuntoValida, ADJUNTO_MAX_BYTES } from '../../shared/archivos';
+import { guardarAdjunto, esRutaAdjuntoValida, ADJUNTO_MAX_BYTES, TAREA_VIDEO_MAX_BYTES } from '../../shared/archivos';
 
 /** Subcarpeta de /uploads donde viven los adjuntos clínicos (aislados de reclamos). */
 const HC_SUBCARPETA = 'hc';
 /** Recibe el archivo como binario crudo (NO base64). Content-Type = MIME del archivo. */
 const rawUpload = express.raw({ type: () => true, limit: ADJUNTO_MAX_BYTES + 4096 });
+/** Igual, pero con tope más alto: la tarea puede llevar un VIDEO propio corto (40 MB). */
+const rawUploadTarea = express.raw({ type: () => true, limit: TAREA_VIDEO_MAX_BYTES + 4096 });
 
 /**
  * Rutas del módulo Historias Clínicas (centros terapéuticos).
@@ -58,6 +60,16 @@ router.get('/catalogos', w(async (_req, res) => {
 router.get('/pacientes', w(async (req, res) => {
   const incluirInactivos = req.query.todos === '1' || req.query.todos === 'true';
   res.json(await historiasRepo.listPacientes(tid(req), incluirInactivos));
+}));
+
+// Verifica si un documento ya está registrado (para avisar al llenar el input).
+// Va ANTES de '/pacientes/:id' para que ':id' no capture 'existe'.
+router.get('/pacientes/existe', w(async (req, res) => {
+  const p = await historiasRepo.buscarPorDoc(
+    tid(req), String(req.query.tipo_doc || '1'), String(req.query.num_doc || ''),
+    req.query.excluir_id ? Number(req.query.excluir_id) : undefined,
+  );
+  res.json({ existe: !!p, paciente: p ? { id: p.id, nombre: `${p.apellidos}, ${p.nombres}` } : null });
 }));
 
 router.get('/pacientes/:id', w(async (req, res) => {
@@ -197,13 +209,15 @@ router.delete('/tareas/:id', escribeClinico, w(async (req, res) => {
   res.status(204).send();
 }));
 
-/** Adjunta un AUDIO (mp3) o imagen a la tarea. Binario crudo, igual que adjuntos. */
-router.post('/tareas/:id/adjunto', escribeClinico, rawUpload, w(async (req, res) => {
+/** Adjunta un AUDIO, imagen o VIDEO corto a la tarea. Binario crudo, igual que adjuntos.
+ *  Los videos usan un tope mayor (TAREA_VIDEO_MAX_BYTES); audio/imagen el normal. */
+router.post('/tareas/:id/adjunto', escribeClinico, rawUploadTarea, w(async (req, res) => {
   const mime = String(req.headers['content-type'] || '');
   let nombre = 'audio';
   try { nombre = decodeURIComponent(String(req.headers['x-file-name'] || 'audio')); } catch { /* deja 'audio' */ }
   const buffer = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? []);
-  const guardado = guardarAdjunto(buffer, mime, nombre, HC_SUBCARPETA);
+  const esVideo = mime.toLowerCase().startsWith('video');
+  const guardado = guardarAdjunto(buffer, mime, nombre, HC_SUBCARPETA, esVideo ? TAREA_VIDEO_MAX_BYTES : ADJUNTO_MAX_BYTES);
   if (!esRutaAdjuntoValida(guardado.ruta, HC_SUBCARPETA)) {
     res.status(400).json({ error: 'No se pudo guardar el archivo' }); return;
   }
@@ -234,6 +248,24 @@ router.patch('/sesiones/:id', escribeClinico, w(async (req, res) => {
   const s = await historiasRepo.updateSesion(tid(req), Number(req.params.id), req.body ?? {}, uid(req));
   if (!s) { res.status(404).json({ error: 'Sesión no encontrada' }); return; }
   res.json(s);
+}));
+
+// ── Tratamientos (etapas de atención; varios servicios a la vez) ──────────────
+router.get('/historias/:id/tratamientos', w(async (req, res) => {
+  res.json(await historiasRepo.listTratamientos(tid(req), Number(req.params.id)));
+}));
+router.post('/historias/:id/tratamientos', escribeClinico, w(async (req, res) => {
+  res.status(201).json(await historiasRepo.createTratamiento(tid(req), Number(req.params.id), req.body ?? {}, uid(req)));
+}));
+router.patch('/tratamientos/:id', escribeClinico, w(async (req, res) => {
+  const t = await historiasRepo.updateTratamiento(tid(req), Number(req.params.id), req.body ?? {}, uid(req));
+  if (!t) { res.status(404).json({ error: 'Tratamiento no encontrado' }); return; }
+  res.json(t);
+}));
+router.delete('/tratamientos/:id', escribeClinico, w(async (req, res) => {
+  const ok = await historiasRepo.deleteTratamiento(tid(req), Number(req.params.id));
+  if (!ok) { res.status(404).json({ error: 'Tratamiento no encontrado' }); return; }
+  res.json({ ok: true });
 }));
 
 // ── Servicios del centro (gestión: ADMIN + ADMISION) ──────────────────────────

@@ -15,6 +15,55 @@ function pool() {
   return p;
 }
 
+/**
+ * Auto-sana la columna `hc_tareas.video_url` (enlace de YouTube para la tarea; el
+ * video propio va como adjunto). Se crea sola si la migración no corrió en prod, así
+ * las queries que la referencian no fallan. Ver scripts/mysql-hc-tareas-video.sql.
+ */
+let _ensuredTareaVideo = false;
+async function ensureTareaVideo(): Promise<void> {
+  if (_ensuredTareaVideo) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'hc_tareas'
+        AND COLUMN_NAME = 'video_url' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query('ALTER TABLE hc_tareas ADD COLUMN video_url VARCHAR(500) NULL AFTER adjunto_mime');
+  }
+  _ensuredTareaVideo = true;
+}
+
+/** Auto-sana la tabla intermedia `hc_apoderados` (un paciente menor puede tener
+ *  hasta 2 apoderados; se guardan como FILAS, no como columnas). Se crea sola si la
+ *  migración no corrió. Ver scripts/mysql-hc-apoderados.sql. */
+let _ensuredApoderados = false;
+async function ensureApoderados(): Promise<void> {
+  if (_ensuredApoderados) return;
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS hc_apoderados (
+       id           INT AUTO_INCREMENT PRIMARY KEY,
+       empresa_id   INT NOT NULL,
+       paciente_id  INT NOT NULL,
+       nombre       VARCHAR(160) NOT NULL,
+       tipo_doc     CHAR(1)      DEFAULT NULL,
+       num_doc      VARCHAR(20)  DEFAULT NULL,
+       telefono     VARCHAR(30)  DEFAULT NULL,
+       relacion     VARCHAR(60)  DEFAULT NULL,
+       orden        TINYINT      NOT NULL DEFAULT 1,
+       created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       CONSTRAINT fk_hcapod_empresa  FOREIGN KEY (empresa_id)  REFERENCES empresas(id)     ON DELETE CASCADE,
+       CONSTRAINT fk_hcapod_paciente FOREIGN KEY (paciente_id) REFERENCES hc_pacientes(id) ON DELETE CASCADE,
+       INDEX idx_hcapod_paciente (paciente_id)
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+       COMMENT='Apoderados/tutores de un paciente (hasta 2 por paciente menor)'`,
+  );
+  _ensuredApoderados = true;
+}
+
+/** Máximo de apoderados por paciente (regla de negocio). */
+const MAX_APODERADOS = 2;
+
 /** tenant_slug -> empresa_id (tenant). Igual criterio que el resto del sistema. */
 async function getEmpresaId(tenantSlug: string): Promise<number> {
   const [rows] = await pool().query<any[]>(
@@ -36,10 +85,21 @@ export interface PacienteDto {
   telefono?: string | null;
   email?: string | null;
   direccion?: string | null;
+  /** Apoderados/tutores (tabla intermedia hc_apoderados). Escalable: lista de filas. */
+  apoderados?: ApoderadoDto[];
+  // Legado (una sola columna en hc_pacientes); se conserva para no romper datos viejos.
   apoderado_nombre?: string | null;
   apoderado_telefono?: string | null;
   apoderado_relacion?: string | null;
   observaciones?: string | null;
+}
+
+export interface ApoderadoDto {
+  nombre: string;
+  relacion?: string | null;
+  telefono?: string | null;
+  tipo_doc?: string | null;
+  num_doc?: string | null;
 }
 
 export interface HistoriaDto {
@@ -107,6 +167,21 @@ export interface TareaDto {
   fecha_limite?: string | null;
   cumplida?: boolean;
   activo?: boolean;
+  video_url?: string | null;   // enlace de YouTube (el video propio va como adjunto)
+}
+
+/** Un servicio dentro de un tratamiento, con su terapeuta a cargo. */
+export interface TratamientoServicioDto {
+  servicio_id: number;
+  terapeuta_id?: number | null;
+}
+export interface TratamientoDto {
+  motivo?: string | null;
+  fecha_inicio?: string | null;
+  fecha_fin?: string | null;
+  estado_id?: number;          // -> hc_tratamiento_estado (1 en curso, 2 pausa, 3 alta)
+  nota_cierre?: string | null;
+  servicios?: TratamientoServicioDto[];   // servicios que abarca (varios a la vez)
 }
 
 export const historiasRepo = {
@@ -118,7 +193,8 @@ export const historiasRepo = {
     const [tiposDx]      = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_diagnostico_tipo WHERE activo = 1 ORDER BY id');
     const [estadosCita]  = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_cita_estado WHERE activo = 1 ORDER BY id');
     const [estadosObj]   = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_objetivo_estado WHERE activo = 1 ORDER BY id').catch(() => [[]]);
-    return { sexos, estados_historia: estadosHist, tipos_diagnostico: tiposDx, estados_cita: estadosCita, estados_objetivo: estadosObj };
+    const [estadosTrat]  = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_tratamiento_estado WHERE activo = 1 ORDER BY id').catch(() => [[]]);
+    return { sexos, estados_historia: estadosHist, tipos_diagnostico: tiposDx, estados_cita: estadosCita, estados_objetivo: estadosObj, estados_tratamiento: estadosTrat };
   },
 
   // ── Pacientes ──────────────────────────────────────────────────────────────
@@ -146,33 +222,99 @@ export const historiasRepo = {
         WHERE p.empresa_id = ? AND p.id = ? LIMIT 1`,
       [empresaId, id],
     );
-    return rows[0] ?? null;
+    return rows[0] ? this._conApoderados(empresaId, rows[0]) : null;
+  },
+
+  /** Adjunta el array `apoderados` a una fila de paciente. Si el paciente viejo no
+   *  tiene filas en hc_apoderados pero sí la columna legada, la sintetiza como 1 apoderado. */
+  async _conApoderados(empresaId: number, p: any) {
+    const map = await this._apoderadosDe(empresaId, [p.id]);
+    let apoderados = map[p.id] ?? [];
+    if (!apoderados.length && p.apoderado_nombre) {
+      apoderados = [{ id: 0, paciente_id: p.id, nombre: p.apoderado_nombre, relacion: p.apoderado_relacion ?? null, telefono: p.apoderado_telefono ?? null, tipo_doc: null, num_doc: null, orden: 1 }];
+    }
+    return { ...p, apoderados };
+  },
+
+  /** ¿Ya existe un paciente con ese documento en el centro? (excluye un id al editar).
+   *  Devuelve el paciente encontrado o null. Todos se identifican por su documento. */
+  async buscarPorDoc(tenantSlug: string, tipoDoc: string, numDoc: string, excluirId?: number) {
+    const num = (numDoc || '').trim();
+    if (!num) return null;
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT id, nombres, apellidos FROM hc_pacientes
+        WHERE empresa_id = ? AND tipo_doc = ? AND num_doc = ? ${excluirId ? 'AND id <> ?' : ''} LIMIT 1`,
+      excluirId ? [empresaId, tipoDoc || '1', num, excluirId] : [empresaId, tipoDoc || '1', num],
+    );
+    return (rows as any[])[0] ?? null;
   },
 
   async createPaciente(tenantSlug: string, dto: PacienteDto, userId?: number) {
     if (!dto.nombres?.trim() || !dto.apellidos?.trim()) {
       throw new AppError('Nombres y apellidos son requeridos', 400);
     }
+    await ensureApoderados();
     const empresaId = await getEmpresaId(tenantSlug);
+    // El documento identifica al paciente: si ya existe, no se registra de nuevo.
+    if (dto.num_doc?.trim()) {
+      const dup = await this.buscarPorDoc(tenantSlug, dto.tipo_doc || '1', dto.num_doc);
+      if (dup) throw new AppError(`Ya hay un paciente registrado con ese documento: ${dup.apellidos}, ${dup.nombres}.`, 409);
+    }
     const [res] = await pool().query<any>(
       `INSERT INTO hc_pacientes
          (empresa_id, tipo_doc, num_doc, nombres, apellidos, fecha_nacimiento, sexo_id,
-          telefono, email, direccion, apoderado_nombre, apoderado_telefono,
-          apoderado_relacion, observaciones, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          telefono, email, direccion, observaciones, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        empresaId, dto.tipo_doc || '1', dto.num_doc || null,
+        empresaId, dto.tipo_doc || '1', dto.num_doc?.trim() || null,
         dto.nombres.trim(), dto.apellidos.trim(), dto.fecha_nacimiento || null, dto.sexo_id || null,
         dto.telefono || null, dto.email || null, dto.direccion || null,
-        dto.apoderado_nombre || null, dto.apoderado_telefono || null,
-        dto.apoderado_relacion || null, dto.observaciones || null, userId ?? null,
+        dto.observaciones || null, userId ?? null,
       ],
     );
+    if (dto.apoderados) await this._setApoderados(empresaId, res.insertId, dto.apoderados);
     return this.getPacienteById(empresaId, res.insertId);
   },
 
+  /** Reemplaza el set de apoderados del paciente (hasta MAX_APODERADOS). */
+  async _setApoderados(empresaId: number, pacienteId: number, lista: ApoderadoDto[]) {
+    await ensureApoderados();
+    await pool().query('DELETE FROM hc_apoderados WHERE empresa_id = ? AND paciente_id = ?', [empresaId, pacienteId]);
+    const validos = (lista || []).filter(a => a?.nombre?.trim()).slice(0, MAX_APODERADOS);
+    let orden = 1;
+    for (const a of validos) {
+      await pool().query(
+        `INSERT INTO hc_apoderados (empresa_id, paciente_id, nombre, relacion, telefono, tipo_doc, num_doc, orden)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [empresaId, pacienteId, a.nombre.trim(), a.relacion || null, a.telefono || null, a.tipo_doc || null, a.num_doc || null, orden++],
+      );
+    }
+  },
+
+  /** Apoderados de una lista de pacientes, agrupados por paciente_id. */
+  async _apoderadosDe(empresaId: number, pacienteIds: number[]) {
+    const porPac: Record<number, any[]> = {};
+    if (!pacienteIds.length) return porPac;
+    await ensureApoderados();
+    const [rows] = await pool().query<any[]>(
+      `SELECT id, paciente_id, nombre, relacion, telefono, tipo_doc, num_doc, orden
+         FROM hc_apoderados WHERE empresa_id = ? AND paciente_id IN (${pacienteIds.map(() => '?').join(',')})
+        ORDER BY orden, id`,
+      [empresaId, ...pacienteIds],
+    );
+    for (const r of rows) (porPac[r.paciente_id] ??= []).push(r);
+    return porPac;
+  },
+
   async updatePaciente(tenantSlug: string, id: number, dto: PacienteDto, userId?: number) {
+    await ensureApoderados();
     const empresaId = await getEmpresaId(tenantSlug);
+    // Documento único: si cambian el doc a uno ya usado por OTRO paciente, se rechaza.
+    if (dto.num_doc?.trim()) {
+      const dup = await this.buscarPorDoc(tenantSlug, dto.tipo_doc || '1', dto.num_doc, id);
+      if (dup) throw new AppError(`Ya hay otro paciente con ese documento: ${dup.apellidos}, ${dup.nombres}.`, 409);
+    }
     const campos: string[] = [];
     const vals: any[] = [];
     const set = (col: string, val: any) => { campos.push(`${col} = ?`); vals.push(val); };
@@ -191,13 +333,13 @@ export const historiasRepo = {
     if (dto.apoderado_relacion !== undefined) set('apoderado_relacion', dto.apoderado_relacion || null);
     if (dto.observaciones !== undefined)      set('observaciones', dto.observaciones || null);
 
+    if (dto.apoderados !== undefined) await this._setApoderados(empresaId, id, dto.apoderados);
     if (!campos.length) return this.getPacienteById(empresaId, id);
     set('user_actua_id', userId ?? null);
     vals.push(empresaId, id);
     const [res] = await pool().query<any>(
       `UPDATE hc_pacientes SET ${campos.join(', ')} WHERE empresa_id = ? AND id = ?`, vals,
     );
-    if (!res.affectedRows) return null;
     return this.getPacienteById(empresaId, id);
   },
 
@@ -218,7 +360,7 @@ export const historiasRepo = {
         WHERE p.empresa_id = ? AND p.id = ? LIMIT 1`,
       [empresaId, id],
     );
-    return rows[0] ?? null;
+    return rows[0] ? this._conApoderados(empresaId, rows[0]) : null;
   },
 
   // ── Historia clínica (1 por paciente) ────────────────────────────────────────
@@ -731,10 +873,11 @@ export const historiasRepo = {
 
   // ── Tareas para casa ──────────────────────────────────────────────────────────
   async listTareas(tenantSlug: string, historiaId: number) {
+    await ensureTareaVideo();
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
       `SELECT id, historia_id, sesion_id, descripcion, detalle,
-              adjunto_ruta, adjunto_nombre, adjunto_mime,
+              adjunto_ruta, adjunto_nombre, adjunto_mime, video_url,
               fecha_limite, cumplida, cumplida_at, activo, created_at
          FROM hc_tareas WHERE empresa_id = ? AND historia_id = ? AND activo = 1
         ORDER BY cumplida ASC, created_at DESC`,
@@ -757,17 +900,19 @@ export const historiasRepo = {
 
   async createTarea(tenantSlug: string, historiaId: number, dto: TareaDto, userId?: number) {
     if (!dto.descripcion?.trim()) throw new AppError('La descripción de la tarea es requerida', 400);
+    await ensureTareaVideo();
     const empresaId = await getEmpresaId(tenantSlug);
     const [res] = await pool().query<any>(
-      `INSERT INTO hc_tareas (empresa_id, historia_id, descripcion, detalle, fecha_limite, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [empresaId, historiaId, dto.descripcion.trim(), dto.detalle || null, dto.fecha_limite || null, userId ?? null],
+      `INSERT INTO hc_tareas (empresa_id, historia_id, descripcion, detalle, fecha_limite, video_url, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, historiaId, dto.descripcion.trim(), dto.detalle || null, dto.fecha_limite || null, dto.video_url?.trim() || null, userId ?? null],
     );
     const [rows] = await pool().query<any[]>('SELECT * FROM hc_tareas WHERE id = ?', [res.insertId]);
     return rows[0];
   },
 
   async updateTarea(tenantSlug: string, id: number, dto: TareaDto) {
+    await ensureTareaVideo();
     const empresaId = await getEmpresaId(tenantSlug);
     const campos: string[] = [];
     const vals: any[] = [];
@@ -775,6 +920,7 @@ export const historiasRepo = {
     if (dto.descripcion !== undefined)  set('descripcion', dto.descripcion.trim());
     if (dto.detalle !== undefined)      set('detalle', dto.detalle || null);
     if (dto.fecha_limite !== undefined) set('fecha_limite', dto.fecha_limite || null);
+    if (dto.video_url !== undefined)    set('video_url', dto.video_url?.trim() || null);
     if (dto.activo !== undefined)       set('activo', dto.activo ? 1 : 0);
     if (dto.cumplida !== undefined) {
       set('cumplida', dto.cumplida ? 1 : 0);
@@ -791,6 +937,104 @@ export const historiasRepo = {
   async deleteTarea(tenantSlug: string, id: number) {
     const empresaId = await getEmpresaId(tenantSlug);
     const [res] = await pool().query<any>('DELETE FROM hc_tareas WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    return res.affectedRows > 0;
+  },
+
+  // ── Tratamientos (etapas de atención; varios servicios a la vez) ──────────────
+  /** Reemplaza el set de servicios de un tratamiento (cada uno con su terapeuta). */
+  async _setTratamientoServicios(empresaId: number, tratamientoId: number, servicios: TratamientoServicioDto[]) {
+    await pool().query('DELETE FROM hc_tratamiento_servicio WHERE empresa_id = ? AND tratamiento_id = ?', [empresaId, tratamientoId]);
+    for (const s of servicios) {
+      if (!s?.servicio_id) continue;
+      await pool().query(
+        `INSERT INTO hc_tratamiento_servicio (empresa_id, tratamiento_id, servicio_id, terapeuta_id) VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE terapeuta_id = VALUES(terapeuta_id), activo = 1`,
+        [empresaId, tratamientoId, s.servicio_id, s.terapeuta_id ?? null],
+      );
+    }
+  },
+
+  /** Trae los servicios (con terapeuta) de una lista de tratamientos, agrupados por id. */
+  async _serviciosDeTratamientos(empresaId: number, tratamientoIds: number[]) {
+    const porTrat: Record<number, any[]> = {};
+    if (!tratamientoIds.length) return porTrat;
+    const [rows] = await pool().query<any[]>(
+      `SELECT ts.tratamiento_id, ts.servicio_id, ts.terapeuta_id,
+              s.nombre AS servicio_nombre,
+              CONCAT(u.nombres, ' ', u.apellidos) AS terapeuta_nombre
+         FROM hc_tratamiento_servicio ts
+         JOIN hc_servicios s ON s.id = ts.servicio_id
+         LEFT JOIN usuarios u ON u.id = ts.terapeuta_id
+        WHERE ts.empresa_id = ? AND ts.activo = 1 AND ts.tratamiento_id IN (${tratamientoIds.map(() => '?').join(',')})
+        ORDER BY s.nombre`,
+      [empresaId, ...tratamientoIds],
+    );
+    for (const r of rows) (porTrat[r.tratamiento_id] ??= []).push(r);
+    return porTrat;
+  },
+
+  async listTratamientos(tenantSlug: string, historiaId: number) {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT t.*, e.codigo AS estado_codigo, e.nombre AS estado_nombre
+         FROM hc_tratamientos t
+         LEFT JOIN hc_tratamiento_estado e ON e.id = t.estado_id
+        WHERE t.empresa_id = ? AND t.historia_id = ?
+        ORDER BY (t.estado_id = 3) ASC, t.fecha_inicio DESC, t.id DESC`,
+      [empresaId, historiaId],
+    );
+    const servicios = await this._serviciosDeTratamientos(empresaId, rows.map(r => r.id));
+    return rows.map(r => ({ ...r, servicios: servicios[r.id] ?? [] }));
+  },
+
+  async getTratamiento(empresaId: number, id: number) {
+    const [rows] = await pool().query<any[]>(
+      `SELECT t.*, e.codigo AS estado_codigo, e.nombre AS estado_nombre
+         FROM hc_tratamientos t LEFT JOIN hc_tratamiento_estado e ON e.id = t.estado_id
+        WHERE t.empresa_id = ? AND t.id = ? LIMIT 1`, [empresaId, id],
+    );
+    if (!rows[0]) return null;
+    const servicios = await this._serviciosDeTratamientos(empresaId, [id]);
+    return { ...rows[0], servicios: servicios[id] ?? [] };
+  },
+
+  async createTratamiento(tenantSlug: string, historiaId: number, dto: TratamientoDto, userId?: number) {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [res] = await pool().query<any>(
+      `INSERT INTO hc_tratamientos (empresa_id, historia_id, motivo, fecha_inicio, estado_id, user_crea_id)
+       VALUES (?, ?, ?, COALESCE(?, CURRENT_DATE), COALESCE(?, 1), ?)`,
+      [empresaId, historiaId, dto.motivo?.trim() || null, dto.fecha_inicio || null, dto.estado_id || null, userId ?? null],
+    );
+    await this._setTratamientoServicios(empresaId, res.insertId, dto.servicios ?? []);
+    return this.getTratamiento(empresaId, res.insertId);
+  },
+
+  async updateTratamiento(tenantSlug: string, id: number, dto: TratamientoDto, userId?: number) {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const campos: string[] = [];
+    const vals: any[] = [];
+    const set = (c: string, v: any) => { campos.push(`${c} = ?`); vals.push(v); };
+    if (dto.motivo !== undefined)       set('motivo', dto.motivo?.trim() || null);
+    if (dto.fecha_inicio !== undefined) set('fecha_inicio', dto.fecha_inicio || null);
+    if (dto.nota_cierre !== undefined)  set('nota_cierre', dto.nota_cierre?.trim() || null);
+    if (dto.estado_id !== undefined) {
+      set('estado_id', dto.estado_id);
+      // Al dar de ALTA (3) se marca la fecha de cierre; al reabrir/pausar se limpia.
+      set('fecha_fin', dto.estado_id === 3 ? new Date() : null);
+    }
+    if (dto.fecha_fin !== undefined)    set('fecha_fin', dto.fecha_fin || null);
+    if (campos.length) {
+      set('user_actua_id', userId ?? null);
+      vals.push(empresaId, id);
+      await pool().query(`UPDATE hc_tratamientos SET ${campos.join(', ')} WHERE empresa_id = ? AND id = ?`, vals);
+    }
+    if (dto.servicios !== undefined) await this._setTratamientoServicios(empresaId, id, dto.servicios);
+    return this.getTratamiento(empresaId, id);
+  },
+
+  async deleteTratamiento(tenantSlug: string, id: number) {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [res] = await pool().query<any>('DELETE FROM hc_tratamientos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
     return res.affectedRows > 0;
   },
 
@@ -904,8 +1148,9 @@ export const historiasRepo = {
 
     let tareas: any[] = [];
     if (historia) {
+      await ensureTareaVideo();
       const [ts] = await pool().query<any[]>(
-        `SELECT id, descripcion, detalle, adjunto_ruta, adjunto_nombre, adjunto_mime, fecha_limite, cumplida, cumplida_at
+        `SELECT id, descripcion, detalle, adjunto_ruta, adjunto_nombre, adjunto_mime, video_url, fecha_limite, cumplida, cumplida_at
            FROM hc_tareas WHERE historia_id = ? AND empresa_id = ? AND activo = 1
           ORDER BY cumplida ASC, created_at DESC`,
         [historia.id, empresa_id],
