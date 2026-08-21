@@ -431,8 +431,11 @@ export function pintarLienzo(
       const align = c.align ?? 'center';
       const tSize = c.textSize ?? 12;
       const cargoSize = Math.max(6, tSize - 2);
+      // La línea va CON el texto: arriba del nombre.
+      doc.moveTo(x, y).lineTo(x + w, y).lineWidth(1).strokeColor('#475569').stroke();
+      const textY = y + 4 * PX;
       doc.font(fontFor(true, false, 'sans', reg)).fontSize(tSize * PX).fillColor('#1e293b')
-        .text(firma.nombre_autoridad, x, y, { width: w, align, lineGap: 1 });
+        .text(firma.nombre_autoridad, x, textY, { width: w, align, lineGap: 1 });
       doc.font(fontFor(false, true, 'sans', reg)).fontSize(cargoSize * PX).fillColor('#64748b')
         .text(firma.cargo, x, doc.y + 1, { width: w, align });
       continue;
@@ -459,13 +462,13 @@ export function pintarLienzo(
           doc.image(im, x + (w - dispW) / 2, y, { height: h });
         } catch (e) { console.warn('[lienzo] Error firma:', (e as Error).message); }
       }
-      // Línea de firma: un poco más ancha que la imagen (36px por lado), no al ras ni larga. Centrada.
-      const lineW = dispW + 72 * PX;
-      const lineX = x + (w - lineW) / 2;
-      const lineaY = y + h;
-      doc.moveTo(lineX, lineaY).lineTo(lineX + lineW, lineaY).lineWidth(1).strokeColor('#475569').stroke();
-      // Nombre + cargo, salvo que el texto esté separado en su propio elemento (firmatextoN).
+      // La línea va CON el TEXTO. Si el texto está separado (soloImagen), la imagen queda sola SIN línea.
       if (!c.soloImagen) {
+        // Línea: un poco más ancha que la imagen (36px por lado), no al ras ni larga. Centrada.
+        const lineW = dispW + 72 * PX;
+        const lineX = x + (w - lineW) / 2;
+        const lineaY = y + h;
+        doc.moveTo(lineX, lineaY).lineTo(lineX + lineW, lineaY).lineWidth(1).strokeColor('#475569').stroke();
         // Texto INDEPENDIENTE de la imagen: nombre = textSize; cargo = textSize − 2 (en px → ×PX).
         const tSize = c.textSize ?? 12;
         const cargoSize = Math.max(6, tSize - 2);

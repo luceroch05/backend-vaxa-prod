@@ -15,6 +15,7 @@ import { bloqueoVencimientoMiddleware } from './middleware/bloqueo-vencimiento.m
 import { requireRootTenant } from './middleware/require-root-tenant.middleware';
 import { creditosAdminRoutes } from './modules/admin/creditos.admin.routes';
 import { adminRoutes } from './modules/admin/admin.routes';
+import { adminRepo } from './modules/admin/admin.repository';
 import { cotizacionRoutes } from './modules/cotizaciones/cotizacion.routes';
 import { reclamosPublicRoutes } from './modules/reclamaciones/reclamo.public.routes';
 import { reclamosAdminRoutes } from './modules/reclamaciones/reclamo.admin.routes';
@@ -128,6 +129,12 @@ app.use(`${BASE_PATH}/public/portal`, publicLimiter, historiasPublicRoutes);
 
 /** Web pública editable (landing del cliente) — lectura por tenant (sin JWT ni tenant middleware). */
 app.use(`${BASE_PATH}/public/web`, publicLimiter, webPublicRoutes);
+
+/** Redes/contacto de la landing de Vaxa — lectura pública (se edita desde sistemas-vaxa). */
+app.get(`${BASE_PATH}/public/vaxa-landing`, publicLimiter, async (_req, res) => {
+  try { res.json(await adminRepo.getVaxaLanding()); }
+  catch { res.json({}); }
+});
 
 /** Certificados: JWT + verificación de que el tenant del token == x-tenant-id */
 app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, certificadosRoutes);

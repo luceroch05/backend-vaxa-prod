@@ -191,6 +191,14 @@ router.delete('/empresas/:id/usuarios/:usuarioId', w(async (req, res) => {
   res.json(await adminRepo.eliminarUsuario(Number(req.params.id), Number(req.params.usuarioId), producto));
 }));
 
+/** Redes/contacto de la landing pública de Vaxa (editable desde sistemas-vaxa). */
+router.get('/vaxa-landing', w(async (_req, res) => {
+  res.json(await adminRepo.getVaxaLanding());
+}));
+router.put('/vaxa-landing', w(async (req, res) => {
+  res.json(await adminRepo.saveVaxaLanding(req.body ?? {}));
+}));
+
 /** Roles (para el selector al crear usuario) */
 router.get('/roles', w(async (_req, res) => {
   res.json(await adminRepo.listRoles());

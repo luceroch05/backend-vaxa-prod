@@ -2,6 +2,7 @@ import { Router } from 'express';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { historiasRepo } from './historias.repository';
+import { hcAuditoriaRepo, type HcAuditRef } from './hc-auditoria.repository';
 import { sendError } from '../../shared/errors';
 import { guardarAdjunto, esRutaAdjuntoValida, ADJUNTO_MAX_BYTES, TAREA_VIDEO_MAX_BYTES } from '../../shared/archivos';
 
@@ -51,9 +52,117 @@ const escribeClinico   = requireRol('ADMINISTRADOR', 'TERAPEUTA');      // conte
 
 const router = Router();
 
+// ── Auditoría (bitácora de acciones sobre datos clínicos) ─────────────────────
+const ipDe = (req: Request): string | null =>
+  (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.socket?.remoteAddress || null;
+
+/** Deriva { accion, entidad, ref } desde el método + segmentos de la ruta + el body.
+ *  `ref` lleva los ids/nombres para que el repo resuelva el NOMBRE del paciente y arme
+ *  la frase específica. Devuelve null si esa ruta no se audita. */
+function mapAuditoria(
+  method: string, segs: string[], body: Record<string, any>,
+): { accion: string; entidad: string; ref: HcAuditRef } | null {
+  const M = method.toUpperCase();
+  const n = segs.length;
+  const idAt = (i: number) => { const v = Number(segs[i]); return Number.isFinite(v) ? v : undefined; };
+  const numBody = (k: string) => { const v = Number(body?.[k]); return Number.isFinite(v) ? v : undefined; };
+  const editEliminar = M === 'DELETE' ? 'eliminar' : 'editar';
+
+  // pacientes / historia / acceso / asignación de terapeuta
+  if (segs[0] === 'pacientes') {
+    const id = idAt(1);
+    if (n === 1) return { accion: 'crear', entidad: 'paciente', ref: { nombres: body?.nombres, apellidos: body?.apellidos } };
+    if (n === 2) return { accion: 'editar', entidad: 'paciente', ref: { pacienteId: id } };
+    const sub = segs[2];
+    if (sub === 'activo')     return { accion: 'editar', entidad: 'paciente', ref: { pacienteId: id, activo: body?.activo !== false } };
+    if (sub === 'terapeutas') return { accion: 'asignar', entidad: 'asignacion', ref: { pacienteId: id, terapeutaId: numBody('terapeuta_id') } };
+    if (sub === 'historia')   return { accion: M === 'GET' ? 'ver' : 'crear', entidad: 'historia', ref: { pacienteId: id } };
+    if (sub === 'acceso')     return { accion: M === 'DELETE' ? 'revocar' : 'crear', entidad: 'acceso', ref: { pacienteId: id } };
+    return null;
+  }
+  if (segs[0] === 'asignaciones' && M === 'DELETE') return { accion: 'eliminar', entidad: 'asignacion', ref: { asignacionId: idAt(1) } };
+
+  // historia (cabecera) + sus sub-colecciones (crear); el id de la ruta es el de la HISTORIA
+  if (segs[0] === 'historias') {
+    const historiaId = idAt(1);
+    if (n === 2) return { accion: 'editar', entidad: 'historia', ref: { historiaId } };
+    const ent: Record<string, string> = {
+      diagnosticos: 'diagnostico', objetivos: 'objetivo', tareas: 'tarea',
+      sesiones: 'sesion', tratamientos: 'tratamiento', adjuntos: 'adjunto',
+    };
+    if (segs[2] && ent[segs[2]]) return { accion: 'crear', entidad: ent[segs[2]], ref: { historiaId } };
+    return null;
+  }
+
+  // objetivos / avance
+  if (segs[0] === 'objetivos') {
+    const objetivoId = idAt(1);
+    if (segs[2] === 'avance') return { accion: 'crear', entidad: 'avance', ref: { objetivoId } };
+    return { accion: editEliminar, entidad: 'objetivo', ref: { objetivoId } };
+  }
+  // tareas (+ adjunto)
+  if (segs[0] === 'tareas') {
+    const tareaId = idAt(1);
+    if (segs[2] === 'adjunto') return { accion: M === 'DELETE' ? 'eliminar' : 'adjuntar', entidad: 'tarea', ref: { tareaId } };
+    return { accion: editEliminar, entidad: 'tarea', ref: { tareaId } };
+  }
+  if (segs[0] === 'sesiones')      return { accion: editEliminar, entidad: 'sesion',      ref: { sesionId: idAt(1) } };
+  if (segs[0] === 'tratamientos')  return { accion: editEliminar, entidad: 'tratamiento', ref: { tratamientoId: idAt(1) } };
+  if (segs[0] === 'servicios')     return n === 1
+    ? { accion: 'crear',  entidad: 'servicio', ref: { servicioNombre: body?.nombre } }
+    : { accion: 'editar', entidad: 'servicio', ref: { servicioId: idAt(1) } };
+  if (segs[0] === 'citas')         return n === 1
+    ? { accion: 'crear',  entidad: 'cita', ref: { pacienteIdBody: numBody('paciente_id') } }
+    : { accion: 'editar', entidad: 'cita', ref: { citaId: idAt(1) } };
+  if (segs[0] === 'adjuntos' && M === 'DELETE') return { accion: 'eliminar', entidad: 'adjunto', ref: { adjuntoId: idAt(1) } };
+  if (segs[0] === 'terapeutas' && segs[2] === 'servicios') return { accion: 'editar', entidad: 'terapeuta_servicio', ref: { terapeutaId: idAt(1) } };
+  return null;
+}
+
+/** Middleware: tras una respuesta EXITOSA, registra la acción (fire-and-forget). Audita
+ *  las mutaciones (POST/PATCH/PUT/DELETE) y el ACCESO a la historia clínica (GET). */
+function auditar(req: Request, res: Response, next: NextFunction): void {
+  const M = req.method.toUpperCase();
+  const esMutacion = M === 'POST' || M === 'PATCH' || M === 'PUT' || M === 'DELETE';
+  const esVerHistoria = M === 'GET' && /^\/pacientes\/\d+\/historia\/?$/.test(req.path);
+  if (!esMutacion && !esVerHistoria) { next(); return; }
+
+  // El body puede ser un Buffer en las subidas de archivos (adjuntos/tareas): ahí no hay campos.
+  const body: Record<string, any> = (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) ? req.body : {};
+
+  res.on('finish', () => {
+    if (res.statusCode >= 400) return;   // solo acciones que salieron bien
+    try {
+      const segs = req.path.split('/').filter(Boolean);
+      const info = mapAuditoria(M, segs, body);
+      if (!info) return;
+      const slug = (req.headers['x-tenant-id'] as string)?.toLowerCase()?.trim();
+      if (!slug) return;
+      // Fire-and-forget: nunca esperar ni romper por la auditoría.
+      void hcAuditoriaRepo.registrar({
+        tenant: slug,
+        usuarioId: (req as any).authUser?.sub ?? null,
+        accion: info.accion, entidad: info.entidad, ref: info.ref, ip: ipDe(req),
+      });
+    } catch { /* jamás romper por auditar */ }
+  });
+  next();
+}
+router.use(auditar);
+
 // ── Catálogos ────────────────────────────────────────────────────────────────
 router.get('/catalogos', w(async (_req, res) => {
   res.json(await historiasRepo.catalogos());
+}));
+
+// ── Auditoría: bitácora de acciones (solo ADMINISTRADOR) ──────────────────────
+router.get('/auditoria', soloAdmin, w(async (req, res) => {
+  res.json(await hcAuditoriaRepo.listar(tid(req), {
+    accion:  (req.query.accion  as string | undefined)?.trim() || undefined,
+    entidad: (req.query.entidad as string | undefined)?.trim() || undefined,
+    limit:   req.query.limit  ? Number(req.query.limit)  : undefined,
+    offset:  req.query.offset ? Number(req.query.offset) : undefined,
+  }));
 }));
 
 // ── Pacientes ────────────────────────────────────────────────────────────────

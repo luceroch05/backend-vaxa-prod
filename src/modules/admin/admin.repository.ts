@@ -87,6 +87,36 @@ async function ensureLogoCert(): Promise<void> {
   _ensuredLogoCert = true;
 }
 
+/**
+ * Auto-crea la tabla `vaxa_landing` (una sola fila, id=1) con las redes/contacto que
+ * salen en la landing pública de Vaxa. Editable desde sistemas-vaxa. Siembra los valores
+ * actuales que estaban hardcodeados. Se crea sola, sin migración manual.
+ */
+let _ensuredVaxaLanding = false;
+async function ensureVaxaLanding(): Promise<void> {
+  if (_ensuredVaxaLanding) return;
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS vaxa_landing (
+       id         TINYINT      NOT NULL PRIMARY KEY,
+       facebook   VARCHAR(300) NULL,
+       instagram  VARCHAR(300) NULL,
+       tiktok     VARCHAR(300) NULL,
+       youtube    VARCHAR(300) NULL,
+       linkedin   VARCHAR(300) NULL,
+       whatsapp   VARCHAR(40)  NULL,
+       email      VARCHAR(160) NULL,
+       telefono   VARCHAR(40)  NULL,
+       updated_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  await pool().query(
+    `INSERT IGNORE INTO vaxa_landing (id, whatsapp, email) VALUES (1, '51924600490', 'info@vaxa.com.pe')`,
+  );
+  _ensuredVaxaLanding = true;
+}
+
+const LANDING_CAMPOS = ['facebook', 'instagram', 'tiktok', 'youtube', 'linkedin', 'whatsapp', 'email', 'telefono'] as const;
+
 export interface CrearEmpresaDto {
   razon_social: string;
   tenant_slug?: string;
@@ -544,6 +574,27 @@ export const adminRepo = {
 
     await borrarCuenta();
     return { ok: true };
+  },
+
+  /** Redes/contacto de la landing pública de Vaxa (una sola fila). */
+  async getVaxaLanding() {
+    await ensureVaxaLanding();
+    const [rows] = await pool().query<any[]>(
+      `SELECT ${LANDING_CAMPOS.join(', ')} FROM vaxa_landing WHERE id = 1`,
+    );
+    return (rows as any[])[0] ?? {};
+  },
+
+  /** Guarda las redes/contacto de la landing (upsert de la fila id=1). */
+  async saveVaxaLanding(dto: Record<string, unknown>) {
+    await ensureVaxaLanding();
+    const sets = LANDING_CAMPOS.map(c => `${c} = ?`).join(', ');
+    const vals = LANDING_CAMPOS.map(c => {
+      const v = dto?.[c];
+      return v == null ? null : String(v).trim() || null;
+    });
+    await pool().query(`UPDATE vaxa_landing SET ${sets} WHERE id = 1`, vals);
+    return this.getVaxaLanding();
   },
 
   /** Roles disponibles (para el selector al crear usuario). */

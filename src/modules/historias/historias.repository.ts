@@ -64,6 +64,63 @@ async function ensureApoderados(): Promise<void> {
 /** Máximo de apoderados por paciente (regla de negocio). */
 const MAX_APODERADOS = 2;
 
+/**
+ * Auto-crea y siembra el maestro `hc_nivel_logro` (escala de logro de objetivos), para
+ * que la escala viva en BD y no hardcodeada. El id = número de nivel (coincide con
+ * hc_objetivo_avance.valor / hc_objetivos.meta, así no hay que migrar datos).
+ * Ver scripts/mysql-hc-nivel-logro.sql.
+ */
+let _ensuredNivelLogro = false;
+async function ensureNivelLogro(): Promise<void> {
+  if (_ensuredNivelLogro) return;
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS hc_nivel_logro (
+       id     TINYINT     NOT NULL PRIMARY KEY,
+       codigo VARCHAR(20) NOT NULL UNIQUE,
+       nombre VARCHAR(60) NOT NULL,
+       orden  TINYINT     NOT NULL,
+       activo TINYINT(1)  NOT NULL DEFAULT 1
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  await pool().query(
+    `INSERT INTO hc_nivel_logro (id, codigo, nombre, orden) VALUES
+       (1,'NO_LO_HACE','No lo hace',1),
+       (2,'CON_AYUDA','Con ayuda',2),
+       (3,'A_VECES','Lo hace solo a veces',3),
+       (4,'SOLO','Lo hace solo',4),
+       (5,'VIDA_DIARIA','Lo aplica en su vida diaria',5)
+     ON DUPLICATE KEY UPDATE nombre = VALUES(nombre), orden = VALUES(orden)`,
+  );
+  _ensuredNivelLogro = true;
+}
+
+/**
+ * Auto-agrega `servicio_id` (FK a hc_servicios) a hc_objetivos y hc_sesiones. Así cada
+ * objetivo y cada sesión saben de QUÉ servicio son (un paciente puede llevar varios).
+ * NULL = sin servicio asignado (general). Ver scripts/mysql-hc-servicio-objetivo-sesion.sql.
+ */
+let _ensuredServObjSes = false;
+async function ensureServicioObjSes(): Promise<void> {
+  if (_ensuredServObjSes) return;
+  for (const tabla of ['hc_objetivos', 'hc_sesiones']) {
+    const [cols] = await pool().query<any[]>(
+      `SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'servicio_id' LIMIT 1`,
+      [tabla],
+    );
+    if (!(cols as any[]).length) {
+      await pool().query(`ALTER TABLE ${tabla} ADD COLUMN servicio_id INT NULL AFTER historia_id`);
+      try {
+        await pool().query(
+          `ALTER TABLE ${tabla} ADD CONSTRAINT fk_${tabla}_servicio
+             FOREIGN KEY (servicio_id) REFERENCES hc_servicios(id) ON DELETE SET NULL`,
+        );
+      } catch { /* la FK es opcional; si falla no bloquea */ }
+    }
+  }
+  _ensuredServObjSes = true;
+}
+
 /** tenant_slug -> empresa_id (tenant). Igual criterio que el resto del sistema. */
 async function getEmpresaId(tenantSlug: string): Promise<number> {
   const [rows] = await pool().query<any[]>(
@@ -110,6 +167,7 @@ export interface HistoriaDto {
 
 export interface SesionDto {
   fecha?: string;
+  servicio_id?: number | null;
   subjetivo?: string | null;
   objetivo?: string | null;
   analisis?: string | null;
@@ -154,6 +212,7 @@ export interface ObjetivoDto {
   unidad?: string | null;
   meta?: number | null;
   estado_id?: number;
+  servicio_id?: number | null;
 }
 export interface AvanceDto {
   valor?: number;
@@ -188,13 +247,15 @@ export const historiasRepo = {
   // ── Catálogos (tablas maestras) ────────────────────────────────────────────
   async catalogos() {
     const p = pool();
+    await ensureNivelLogro();
     const [sexos]        = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_sexo WHERE activo = 1 ORDER BY id');
     const [estadosHist]  = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_historia_estado WHERE activo = 1 ORDER BY id');
     const [tiposDx]      = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_diagnostico_tipo WHERE activo = 1 ORDER BY id');
     const [estadosCita]  = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_cita_estado WHERE activo = 1 ORDER BY id');
     const [estadosObj]   = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_objetivo_estado WHERE activo = 1 ORDER BY id').catch(() => [[]]);
     const [estadosTrat]  = await p.query<any[]>('SELECT id, codigo, nombre FROM hc_tratamiento_estado WHERE activo = 1 ORDER BY id').catch(() => [[]]);
-    return { sexos, estados_historia: estadosHist, tipos_diagnostico: tiposDx, estados_cita: estadosCita, estados_objetivo: estadosObj, estados_tratamiento: estadosTrat };
+    const [niveles]      = await p.query<any[]>('SELECT id, codigo, nombre, orden FROM hc_nivel_logro WHERE activo = 1 ORDER BY orden').catch(() => [[]]);
+    return { sexos, estados_historia: estadosHist, tipos_diagnostico: tiposDx, estados_cita: estadosCita, estados_objetivo: estadosObj, estados_tratamiento: estadosTrat, niveles_logro: niveles };
   },
 
   // ── Pacientes ──────────────────────────────────────────────────────────────
@@ -452,9 +513,12 @@ export const historiasRepo = {
   // ── Sesiones / evoluciones (SOAP) ─────────────────────────────────────────────
   async listSesiones(tenantSlug: string, historiaId: number) {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureServicioObjSes();
     const [rows] = await pool().query<any[]>(
-      `SELECT s.*, CONCAT(u.nombres, ' ', u.apellidos) AS terapeuta_nombre
-         FROM hc_sesiones s LEFT JOIN usuarios u ON u.id = s.terapeuta_id
+      `SELECT s.*, CONCAT(u.nombres, ' ', u.apellidos) AS terapeuta_nombre, sv.nombre AS servicio_nombre
+         FROM hc_sesiones s
+         LEFT JOIN usuarios u      ON u.id = s.terapeuta_id
+         LEFT JOIN hc_servicios sv ON sv.id = s.servicio_id
         WHERE s.empresa_id = ? AND s.historia_id = ? ORDER BY s.fecha DESC, s.id DESC`,
       [empresaId, historiaId],
     );
@@ -463,20 +527,23 @@ export const historiasRepo = {
 
   async createSesion(tenantSlug: string, historiaId: number, dto: SesionDto, terapeutaId: number) {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureServicioObjSes();
     // Correlativo dentro de la historia
     const [[{ n }]] = await pool().query<any[]>(
       'SELECT COUNT(*) + 1 AS n FROM hc_sesiones WHERE historia_id = ?', [historiaId],
     ) as any;
     const [res] = await pool().query<any>(
       `INSERT INTO hc_sesiones
-         (empresa_id, historia_id, terapeuta_id, fecha, numero_sesion,
+         (empresa_id, historia_id, servicio_id, terapeuta_id, fecha, numero_sesion,
           subjetivo, objetivo, analisis, plan, evolucion, firmada)
-       VALUES (?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?, ?, ?, ?, ?)`,
-      [empresaId, historiaId, terapeutaId, dto.fecha || null, n,
+       VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, historiaId, dto.servicio_id ?? null, terapeutaId, dto.fecha || null, n,
        dto.subjetivo || null, dto.objetivo || null, dto.analisis || null,
        dto.plan || null, dto.evolucion || null, dto.firmada ? 1 : 0],
     );
-    const [rows] = await pool().query<any[]>('SELECT * FROM hc_sesiones WHERE id = ?', [res.insertId]);
+    const [rows] = await pool().query<any[]>(
+      `SELECT s.*, sv.nombre AS servicio_nombre FROM hc_sesiones s
+         LEFT JOIN hc_servicios sv ON sv.id = s.servicio_id WHERE s.id = ?`, [res.insertId]);
     return rows[0];
   },
 
@@ -763,15 +830,19 @@ export const historiasRepo = {
   /** Lista los objetivos de una historia con su último valor y nº de avances. */
   async listObjetivos(tenantSlug: string, historiaId: number) {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureServicioObjSes();
     const [rows] = await pool().query<any[]>(
       `SELECT o.id, o.historia_id, o.descripcion, o.unidad, o.meta, o.estado_id,
-              o.fecha_inicio, o.fecha_logro,
+              o.fecha_inicio, o.fecha_logro, o.servicio_id, sv.nombre AS servicio_nombre,
               e.codigo AS estado_codigo, e.nombre AS estado_nombre,
               (SELECT a.valor FROM hc_objetivo_avance a WHERE a.objetivo_id = o.id
                 ORDER BY a.fecha DESC, a.id DESC LIMIT 1) AS ultimo_valor,
+              (SELECT a.valor FROM hc_objetivo_avance a WHERE a.objetivo_id = o.id AND a.fecha = CURDATE()
+                ORDER BY a.id DESC LIMIT 1) AS hoy_valor,
               (SELECT COUNT(*) FROM hc_objetivo_avance a WHERE a.objetivo_id = o.id) AS avances
          FROM hc_objetivos o
          LEFT JOIN hc_objetivo_estado e ON e.id = o.estado_id
+         LEFT JOIN hc_servicios sv     ON sv.id = o.servicio_id
         WHERE o.empresa_id = ? AND o.historia_id = ?
         ORDER BY o.created_at DESC, o.id DESC`,
       [empresaId, historiaId],
@@ -782,10 +853,11 @@ export const historiasRepo = {
   async createObjetivo(tenantSlug: string, historiaId: number, dto: ObjetivoDto, userId?: number) {
     if (!dto.descripcion?.trim()) throw new AppError('La descripción del objetivo es requerida', 400);
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureServicioObjSes();
     const [res] = await pool().query<any>(
-      `INSERT INTO hc_objetivos (empresa_id, historia_id, descripcion, unidad, meta, estado_id, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, 1, ?)`,
-      [empresaId, historiaId, dto.descripcion.trim(), dto.unidad || '%',
+      `INSERT INTO hc_objetivos (empresa_id, historia_id, servicio_id, descripcion, unidad, meta, estado_id, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+      [empresaId, historiaId, dto.servicio_id ?? null, dto.descripcion.trim(), dto.unidad || '%',
        dto.meta != null ? dto.meta : 100, userId ?? null],
     );
     return this.getObjetivo(empresaId, res.insertId);
@@ -838,6 +910,8 @@ export const historiasRepo = {
     const empresaId = await getEmpresaId(tenantSlug);
     const obj = await this.getObjetivo(empresaId, objetivoId);
     if (!obj) throw new AppError('Objetivo no encontrado', 404);
+    // Ya logrado (estado 2): no se registran más evaluaciones. Hay que reabrirlo primero.
+    if (obj.estado_id === 2) throw new AppError('El objetivo ya está logrado. Reábrelo si quieres seguir evaluando.', 409);
     if (dto.valor == null || isNaN(Number(dto.valor))) throw new AppError('El valor del avance es requerido', 400);
     const valor = Number(dto.valor);
     await pool().query<any>(
@@ -857,14 +931,19 @@ export const historiasRepo = {
 
   /** Helper: un objetivo con su estado, ya sabiendo el empresa_id. */
   async getObjetivo(empresaId: number, id: number) {
+    await ensureServicioObjSes();
     const [rows] = await pool().query<any[]>(
       `SELECT o.id, o.historia_id, o.descripcion, o.unidad, o.meta, o.estado_id,
-              o.fecha_inicio, o.fecha_logro,
+              o.fecha_inicio, o.fecha_logro, o.servicio_id, sv.nombre AS servicio_nombre,
               e.codigo AS estado_codigo, e.nombre AS estado_nombre,
               (SELECT a.valor FROM hc_objetivo_avance a WHERE a.objetivo_id = o.id
                 ORDER BY a.fecha DESC, a.id DESC LIMIT 1) AS ultimo_valor,
+              (SELECT a.valor FROM hc_objetivo_avance a WHERE a.objetivo_id = o.id AND a.fecha = CURDATE()
+                ORDER BY a.id DESC LIMIT 1) AS hoy_valor,
               (SELECT COUNT(*) FROM hc_objetivo_avance a WHERE a.objetivo_id = o.id) AS avances
-         FROM hc_objetivos o LEFT JOIN hc_objetivo_estado e ON e.id = o.estado_id
+         FROM hc_objetivos o
+         LEFT JOIN hc_objetivo_estado e ON e.id = o.estado_id
+         LEFT JOIN hc_servicios sv     ON sv.id = o.servicio_id
         WHERE o.empresa_id = ? AND o.id = ? LIMIT 1`,
       [empresaId, id],
     );
