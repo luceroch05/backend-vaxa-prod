@@ -67,7 +67,19 @@ export interface CampoFirma {
   x?:  number;  // px
   y?:  number;  // px
   w?:  number;  // px (ancho del bloque)
-  h?:  number;  // px (alto de la imagen de la firma)
+  h?:  number;  // px (alto de la imagen de la firma; manda por altura, el ancho es libre)
+  textSize?: number;  // px del NOMBRE (el cargo va 2px menos). Default 12. Se cambia aparte de la imagen.
+  soloImagen?: boolean;  // si true, este slot dibuja SOLO imagen + línea (el texto va en firmatextoN)
+}
+
+/** Texto (nombre + cargo) de una firma como elemento separado del garabato. */
+export interface CampoFirmaTexto {
+  on?: boolean;
+  x?:  number;  // px
+  y?:  number;  // px
+  w?:  number;  // px (ancho; el texto se alinea dentro)
+  textSize?: number;  // px del NOMBRE (el cargo va 2px menos). Default 12.
+  align?: 'left' | 'center' | 'right';
 }
 
 /** Línea decorativa horizontal. */
@@ -353,7 +365,10 @@ function dibujarSubrayado(
   const lx = c.align === 'left'  ? boxX
            : c.align === 'right' ? boxX + boxW - tw
            :                       boxX + (boxW - tw) / 2;   // center (default)
-  const bottom = (c.y ?? 0) * PX + lineas.length * sizePt * 1.2;   // borde inferior del texto
+  // Alto hasta el pie del texto: las líneas intermedias llevan el interlineado
+  // completo (1.2), pero la ÚLTIMA solo baja ~1.0 (base + descendente) para que la
+  // línea quede PEGADA al texto y no cuelgue el sobrante del interlineado.
+  const bottom = (c.y ?? 0) * PX + ((lineas.length - 1) * 1.2 + 1.0) * sizePt;   // borde inferior del texto
   const uy = bottom + (c.underlineOffset ?? 6) * PX;
   doc.moveTo(lx, uy).lineTo(lx + tw, uy)
     .lineWidth((c.underlineThickness ?? 1.5) * PX)
@@ -404,6 +419,25 @@ export function pintarLienzo(
       continue;
     }
 
+    // TEXTO DE FIRMA separado (nombre + cargo, movibles aparte de la imagen)
+    if (/^firmatexto\d+$/i.test(key)) {
+      const c = raw as CampoFirmaTexto;
+      const idx = Math.max(0, Number(key.replace(/\D/g, '')) - 1);
+      const firma = datos.firmas[idx];
+      if (!firma) continue;
+      const w = (c.w ?? 260) * PX;
+      const x = (c.x ?? 0) * PX;
+      const y = (c.y ?? 0) * PX;
+      const align = c.align ?? 'center';
+      const tSize = c.textSize ?? 12;
+      const cargoSize = Math.max(6, tSize - 2);
+      doc.font(fontFor(true, false, 'sans', reg)).fontSize(tSize * PX).fillColor('#1e293b')
+        .text(firma.nombre_autoridad, x, y, { width: w, align, lineGap: 1 });
+      doc.font(fontFor(false, true, 'sans', reg)).fontSize(cargoSize * PX).fillColor('#64748b')
+        .text(firma.cargo, x, doc.y + 1, { width: w, align });
+      continue;
+    }
+
     // FIRMA (imagen del garabato + nombre + cargo, de datos.firmas por orden)
     if (/^firma\d+$/i.test(key)) {
       const c = raw as CampoFirma;
@@ -414,18 +448,32 @@ export function pintarLienzo(
       const h = (c.h ?? 58) * PX;
       const x = (c.x ?? 0) * PX;
       const y = (c.y ?? 0) * PX;
+      let dispW = w;   // ancho REAL de la imagen (fallback: ancho del bloque si no se pudo leer)
       const img = imagenABuffer(firma.imagen);
       if (img) {
-        try { doc.image(img.data, x, y, { fit: [w, h], align: 'center', valign: 'bottom' }); }
-        catch (e) { console.warn('[lienzo] Error firma:', (e as Error).message); }
+        try {
+          // La imagen manda por ALTURA (h) y se centra en el bloque; el ancho es libre
+          // (según el aspecto real), así no se achica al ancho w. Espejo del front.
+          const im = doc.openImage(img.data);
+          dispW = h * (im.width / im.height);
+          doc.image(im, x + (w - dispW) / 2, y, { height: h });
+        } catch (e) { console.warn('[lienzo] Error firma:', (e as Error).message); }
       }
-      // Línea de firma (horizontal) justo bajo el garabato.
+      // Línea de firma: un poco más ancha que la imagen (36px por lado), no al ras ni larga. Centrada.
+      const lineW = dispW + 72 * PX;
+      const lineX = x + (w - lineW) / 2;
       const lineaY = y + h;
-      doc.moveTo(x, lineaY).lineTo(x + w, lineaY).lineWidth(1).strokeColor('#475569').stroke();
-      doc.font(fontFor(true, false, 'sans', reg)).fontSize(9).fillColor('#1e293b')
-        .text(firma.nombre_autoridad, x, lineaY + 4, { width: w, align: 'center', lineGap: 1 });
-      doc.font(fontFor(false, true, 'sans', reg)).fontSize(7.5).fillColor('#64748b')
-        .text(firma.cargo, x, doc.y + 1, { width: w, align: 'center' });
+      doc.moveTo(lineX, lineaY).lineTo(lineX + lineW, lineaY).lineWidth(1).strokeColor('#475569').stroke();
+      // Nombre + cargo, salvo que el texto esté separado en su propio elemento (firmatextoN).
+      if (!c.soloImagen) {
+        // Texto INDEPENDIENTE de la imagen: nombre = textSize; cargo = textSize − 2 (en px → ×PX).
+        const tSize = c.textSize ?? 12;
+        const cargoSize = Math.max(6, tSize - 2);
+        doc.font(fontFor(true, false, 'sans', reg)).fontSize(tSize * PX).fillColor('#1e293b')
+          .text(firma.nombre_autoridad, x, lineaY + 4, { width: w, align: 'center', lineGap: 1 });
+        doc.font(fontFor(false, true, 'sans', reg)).fontSize(cargoSize * PX).fillColor('#64748b')
+          .text(firma.cargo, x, doc.y + 1, { width: w, align: 'center' });
+      }
       continue;
     }
 

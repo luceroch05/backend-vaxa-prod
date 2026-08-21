@@ -9,6 +9,17 @@ function pool() {
   return p;
 }
 
+/**
+ * ¿El nombre de usuario es una cuenta de soporte de Vaxa? (exactamente "admin" o
+ * "administrador", con o sin dominio). Estas cuentas SÍ pueden repetirse en varias
+ * empresas —mismo correo y misma contraseña— para que Vaxa entre al certificado de
+ * cada empresa. El resto de usuarios siguen siendo únicos a nivel global.
+ */
+const esCuentaSoporteVaxa = (correo: string) => {
+  const usuario = correo.includes('@') ? correo.split('@')[0] : correo;
+  return /^admin(istrador)?$/i.test(usuario.trim());
+};
+
 const slugify = (s: string) =>
   s.toLowerCase().trim()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')   // sin acentos
@@ -378,13 +389,23 @@ export const adminRepo = {
     const [emp] = await pool().query<any[]>('SELECT id FROM empresas WHERE id = ? LIMIT 1', [empresaId]);
     if (!(emp as any[]).length) throw new Error('Empresa no encontrada');
 
-    // Correo único GLOBAL (el nombre de usuario no puede repetirse en ningún
-    // sistema/empresa). Una persona = una cuenta; el acceso a varios productos se
-    // da con filas en usuario_producto, no duplicando el usuario.
-    const [dup] = await pool().query<any[]>(
-      'SELECT id FROM usuarios WHERE correo = ? LIMIT 1', [correo],
-    );
-    if ((dup as any[]).length) throw new Error('Ese correo ya está en uso. El nombre de usuario debe ser único.');
+    // Unicidad del nombre de usuario:
+    //  · Regla general: correo ÚNICO GLOBAL (una persona = una cuenta; el acceso a
+    //    varios productos va por usuario_producto, no duplicando el usuario).
+    //  · Excepción soporte Vaxa (usuario "admin" / "administrador"): puede repetirse
+    //    en varias empresas con el MISMO correo y contraseña; solo debe ser único
+    //    DENTRO de la empresa. El login resuelve por correo + tenant_slug.
+    const esSoporte = esCuentaSoporteVaxa(correo);
+    const [dup] = esSoporte
+      ? await pool().query<any[]>(
+          'SELECT id FROM usuarios WHERE correo = ? AND empresa_id = ? LIMIT 1', [correo, empresaId])
+      : await pool().query<any[]>(
+          'SELECT id FROM usuarios WHERE correo = ? LIMIT 1', [correo]);
+    if ((dup as any[]).length) {
+      throw new Error(esSoporte
+        ? 'Ese usuario ya existe en esta empresa.'
+        : 'Ese correo ya está en uso. El nombre de usuario debe ser único.');
+    }
 
     const hash = await bcrypt.hash(dto.contrasena, 10);
     const [res] = await pool().query<any>(
@@ -443,11 +464,19 @@ export const adminRepo = {
     if (dto.correo !== undefined) {
       const correo = dto.correo.toLowerCase().trim();
       if (!correo) throw new Error('El correo no puede estar vacío');
-      // Correo único GLOBAL (excluyendo al propio usuario).
-      const [dup] = await pool().query<any[]>(
-        'SELECT id FROM usuarios WHERE correo = ? AND id <> ? LIMIT 1', [correo, usuarioId],
-      );
-      if ((dup as any[]).length) throw new Error('Ese correo ya está en uso. El nombre de usuario debe ser único.');
+      // Único GLOBAL, salvo las cuentas de soporte de Vaxa ("admin"/"administrador"),
+      // que solo son únicas dentro de la empresa (ver crearUsuario). Excluye al propio usuario.
+      const esSoporte = esCuentaSoporteVaxa(correo);
+      const [dup] = esSoporte
+        ? await pool().query<any[]>(
+            'SELECT id FROM usuarios WHERE correo = ? AND empresa_id = ? AND id <> ? LIMIT 1', [correo, empresaId, usuarioId])
+        : await pool().query<any[]>(
+            'SELECT id FROM usuarios WHERE correo = ? AND id <> ? LIMIT 1', [correo, usuarioId]);
+      if ((dup as any[]).length) {
+        throw new Error(esSoporte
+          ? 'Ese usuario ya existe en esta empresa.'
+          : 'Ese correo ya está en uso. El nombre de usuario debe ser único.');
+      }
       fields.push('correo = ?'); values.push(correo);
     }
     if (dto.contrasena) {
