@@ -120,6 +120,14 @@ export async function generarPdf(c: any): Promise<Buffer> {
     doc.fillColor('#047857').fontSize(8).font('Helvetica-Bold').text('ACEPTADO POR SUNAT', 160, y + 70);
   }
 
+  // ── Notas / observaciones ── (debajo del QR; se respetan los saltos de línea / párrafos)
+  if (c.notas) {
+    const ny = y + 150;
+    doc.fillColor(DARK).fontSize(8.5).font('Helvetica-Bold').text('Notas', 40, ny);
+    doc.font('Helvetica').fillColor(GREY).fontSize(8);
+    doc.text(String(c.notas).replace(/\r\n/g, '\n'), 40, ny + 12, { width: 515, lineGap: 1.5 });
+  }
+
   doc.end();
   return done;
 }

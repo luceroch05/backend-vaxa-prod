@@ -38,6 +38,7 @@ export interface VentaInput {
   tipoComprobante?: TipoComprobante;  // default 01 factura
   registrarPago?: boolean;            // registrar el pago (default true)
   marcarActivacionUsuarios?: number[]; // usuarios cuya activación (S/50) se cobra en esta venta
+  notas?: string | null;              // observaciones para el PDF (no van a SUNAT). Admite párrafos.
 }
 
 export interface EmitirInput {
@@ -47,6 +48,8 @@ export interface EmitirInput {
   items: ItemComprobante[];
   /** Cliente alternativo (boleta/NV a persona con DNI). Si no, se toma de la empresa. */
   cliente?: { tipoDoc: string; numDoc: string; razonSocial: string; direccion?: string };
+  /** Notas/observaciones para la representación impresa (no van a SUNAT). Admite párrafos. */
+  notas?: string | null;
 }
 
 /** Serie por defecto según el tipo. */
@@ -189,15 +192,16 @@ export const comprobanteRepo = {
       // Nota de venta = monto simple (sin IGV); factura/boleta = con IGV.
       const tot = tipo === 'NV' ? totalesSimples(datos) : calcularTotales(datos);
 
+      const notas = input.notas?.trim() ? input.notas.trim().slice(0, 1000) : null;
       const [ins] = await conn.query<any>(
         `INSERT INTO comprobantes
           (empresa_id, pago_id, tipo_comprobante, serie, correlativo, fecha_emision, hora_emision, moneda,
-           cliente_tipo_doc, cliente_num_doc, cliente_razon_social, cliente_direccion,
+           cliente_tipo_doc, cliente_num_doc, cliente_razon_social, cliente_direccion, notas,
            total_gravado, total_igv, importe_total, estado_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'PEN', ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'PEN', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.empresaId ?? null, input.pagoId ?? null, tipo, serie, correlativo, fechaEmision, horaEmision,
-          cliente.tipoDoc, cliente.numDoc, cliente.razonSocial, cliente.direccion ?? null,
+          cliente.tipoDoc, cliente.numDoc, cliente.razonSocial, cliente.direccion ?? null, notas,
           tot.gravado, tot.igv, tot.total, tipo === 'NV' ? 8 : 1,   // 8 = EMITIDA (no SUNAT) · 1 = PENDIENTE
         ],
       );
@@ -473,6 +477,7 @@ export const comprobanteRepo = {
       tipoComprobante: input.tipoComprobante ?? '01',
       pagoId: pagoId ?? null,
       items,
+      notas: input.notas ?? null,
     });
 
     // ── Sumar créditos al saldo (si alguna línea los otorga) ──
@@ -547,6 +552,7 @@ export const comprobanteRepo = {
     items: VentaItem[];
     descuento?: { tipo: 'monto' | 'pct'; valor: number };
     tipoComprobante: '03' | 'NV';
+    notas?: string | null;
   }) {
     const igvPct = 18;
     // Nota de venta = monto simple (sin IGV); boleta = con IGV.
@@ -578,6 +584,7 @@ export const comprobanteRepo = {
       empresaId: null,
       tipoComprobante: input.tipoComprobante,
       items,
+      notas: input.notas ?? null,
       cliente: {
         tipoDoc: input.cliente.tipoDoc,
         numDoc: input.cliente.tipoDoc === '0' ? '0' : input.cliente.numDoc.trim(),
@@ -627,6 +634,7 @@ export const comprobanteRepo = {
       ...mapResumen(c),
       hash: c.hash_cpe ?? null,
       cliente_direccion: c.cliente_direccion ?? null,
+      notas: c.notas ?? null,
       detalle: det.map((d) => ({
         orden: d.orden, descripcion: d.descripcion, unidad: d.unidad,
         cantidad: Number(d.cantidad), valor_unitario: Number(d.valor_unitario),

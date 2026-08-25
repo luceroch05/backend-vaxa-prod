@@ -112,6 +112,7 @@ router.post('/empresas/:id/venta', w(async (req, res) => {
       : undefined,
     tipoComprobante: b.tipo_comprobante,
     marcarActivacionUsuarios: Array.isArray(b.marcar_activacion_usuarios) ? b.marcar_activacion_usuarios.map(Number) : undefined,
+    notas: typeof b.notas === 'string' ? b.notas : undefined,
   }));
 }));
 
@@ -130,6 +131,7 @@ router.post('/comprobantes/venta-manual', w(async (req, res) => {
       ? { tipo: b.descuento.tipo === 'pct' ? 'pct' : 'monto', valor: Number(b.descuento.valor) }
       : undefined,
     tipoComprobante: b.tipo_comprobante === 'NV' ? 'NV' : '03',
+    notas: typeof b.notas === 'string' ? b.notas : undefined,
   }));
 }));
 
@@ -142,6 +144,7 @@ router.post('/comprobantes', w(async (req, res) => {
     pagoId: b.pago_id ?? null,
     items: b.items ?? [],
     cliente: b.cliente,
+    notas: typeof b.notas === 'string' ? b.notas : undefined,
   }));
 }));
 

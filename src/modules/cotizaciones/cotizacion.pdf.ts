@@ -110,11 +110,14 @@ export async function generarCotizacionPdf(c: CotizacionConDetalle): Promise<Buf
     .text(c.igv_incluido ? 'Precios incluyen IGV (18%).' : 'Precios sin IGV.', 340, y, { width: 207, align: 'right' });
   y += 16;
 
-  // ── Notas ──
+  // ── Notas ── (se respetan los saltos de línea / párrafos que escribió el usuario)
   if (c.notas) {
     doc.fillColor(DARK).fontSize(9).font('Helvetica-Bold').text('Notas', 40, y + 6);
-    doc.font('Helvetica').fillColor(GREY).fontSize(8.5).text(c.notas, 40, y + 20, { width: 515 });
-    y += 40;
+    doc.font('Helvetica').fillColor(GREY).fontSize(8.5);
+    const texto = String(c.notas).replace(/\r\n/g, '\n');
+    const alto = doc.heightOfString(texto, { width: 515, lineGap: 1.5 });
+    doc.text(texto, 40, y + 20, { width: 515, lineGap: 1.5 });
+    y += 26 + alto;
   }
 
   // ── Pie ──
