@@ -561,11 +561,42 @@ export function pintarLienzo(
         }
       }
 
+      // Sin auto-ajuste, el texto DEBE envolverse por el ancho de la caja igual que
+      // en el navegador (CSS whiteSpace: pre-wrap). Como acá dibujamos run por run
+      // con lineBreak:false, pdfkit NO envuelve solo → hay que partir cada línea
+      // lógica (ya separada por \n) en líneas visuales que quepan en `maxW`. Con
+      // auto-ajuste NO se envuelve: se encoge para caber en una sola línea (espejo
+      // exacto de LienzoCampos del front, donde autoFit reduce el tamaño).
+      const envolver = (runs: Run[], s: number): Run[][] => {
+        const medir = (t: string, bold: boolean): number => {
+          doc.font(bold ? fontBold : fontNorm).fontSize(s);
+          return doc.widthOfString(t) + trackPx * t.length;
+        };
+        const limpiar = (l: Run[]): Run[] => { while (l.length && /^\s+$/.test(l[l.length - 1].text)) l.pop(); return l; };
+        const out: Run[][] = [];
+        let cur: Run[] = [];
+        let curW = 0;
+        for (const r of runs) {
+          for (const tok of r.text.split(/(\s+)/)) {   // conserva los espacios como tokens
+            if (!tok) continue;
+            const esEspacio = /^\s+$/.test(tok);
+            if (esEspacio && curW === 0) continue;      // no arrancar una línea con espacio
+            const tokW = medir(tok, r.bold);
+            if (curW > 0 && !esEspacio && curW + tokW > maxW) { out.push(limpiar(cur)); cur = []; curW = 0; }
+            cur.push({ text: tok, bold: r.bold });
+            curW += tokW;
+          }
+        }
+        if (cur.length) out.push(limpiar(cur));
+        return out.length ? out : [runs];
+      };
+      const visuales: Run[][] = c.autoFit ? lineas : lineas.flatMap(l => envolver(l, size));
+
       doc.font(fontNorm).fontSize(size).fillColor(c.color ?? '#0f172a');
       const lineH = doc.currentLineHeight() + 2;
       let y = (c.y ?? 0) * PX;
       const x0 = (c.x ?? 0) * PX;
-      for (const runs of lineas) {
+      for (const runs of visuales) {
         const lineW = anchoLinea(runs, size);
         let x = x0;
         if ((c.align ?? 'center') === 'center') x = x0 + (maxW - lineW) / 2;

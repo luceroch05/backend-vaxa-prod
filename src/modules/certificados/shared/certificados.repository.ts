@@ -2067,6 +2067,7 @@ export const emisionRepo = {
               prog.nombre AS programa_nombre, prog.horas_academicas,
               tp.nombre AS tipo_programa,
               g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3,
+              i.calidad,
               m.nombre AS modalidad, ec.nombre AS estado,
               e.razon_social AS empresa_nombre, e.logo_url AS empresa_logo
        FROM certificados c

@@ -41,6 +41,8 @@ export class CertificadoPublicoEntity {
   fecha_dia3?: string;
   modalidad!: string;
   estado!: string;
+  /** Calidad de participación (Participante, Asistente, Ponente, Organizador…). */
+  calidad?: string;
   empresa_nombre!: string;
   empresa_logo?: string;
   static fromRow(row: any) { return Object.assign(new CertificadoPublicoEntity(), row); }
