@@ -204,6 +204,7 @@ export interface CitaUpdateDto {
 export interface ServicioDto {
   nombre: string;
   descripcion?: string | null;
+  precio?: number | null;
   activo?: boolean;
 }
 
@@ -259,17 +260,28 @@ export const historiasRepo = {
   },
 
   // ── Pacientes ──────────────────────────────────────────────────────────────
-  async listPacientes(tenantSlug: string, incluirInactivos = false) {
+  /** Lista pacientes del centro. Si `soloTerapeutaId` viene, restringe a los pacientes
+   *  ASIGNADOS a ese terapeuta (para el rol TERAPEUTA); ADMIN/ADMISION pasan sin filtro. */
+  async listPacientes(tenantSlug: string, incluirInactivos = false, soloTerapeutaId?: number) {
     const empresaId = await getEmpresaId(tenantSlug);
+    const params: any[] = [empresaId];
+    let filtroAsignado = '';
+    if (soloTerapeutaId) {
+      filtroAsignado = `AND EXISTS (
+        SELECT 1 FROM hc_asignaciones a
+         WHERE a.empresa_id = p.empresa_id AND a.paciente_id = p.id
+           AND a.terapeuta_id = ? AND a.activo = 1)`;
+      params.push(soloTerapeutaId);
+    }
     const [rows] = await pool().query<any[]>(
       `SELECT p.*, s.nombre AS sexo_nombre,
               h.id AS historia_id, h.numero AS historia_numero
          FROM hc_pacientes p
          LEFT JOIN hc_sexo s     ON s.id = p.sexo_id
          LEFT JOIN hc_historias h ON h.paciente_id = p.id
-        WHERE p.empresa_id = ? ${incluirInactivos ? '' : 'AND p.activo = 1'}
+        WHERE p.empresa_id = ? ${incluirInactivos ? '' : 'AND p.activo = 1'} ${filtroAsignado}
         ORDER BY p.apellidos, p.nombres`,
-      [empresaId],
+      params,
     );
     return rows;
   },
@@ -581,7 +593,7 @@ export const historiasRepo = {
   async listServicios(tenantSlug: string, incluirInactivos = false) {
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
-      `SELECT id, nombre, descripcion, activo FROM hc_servicios
+      `SELECT id, nombre, descripcion, precio, activo FROM hc_servicios
         WHERE empresa_id = ? ${incluirInactivos ? '' : 'AND activo = 1'}
         ORDER BY nombre`,
       [empresaId],
@@ -593,10 +605,10 @@ export const historiasRepo = {
     if (!dto.nombre?.trim()) throw new AppError('El nombre del servicio es requerido', 400);
     const empresaId = await getEmpresaId(tenantSlug);
     const [res] = await pool().query<any>(
-      `INSERT INTO hc_servicios (empresa_id, nombre, descripcion, user_crea_id) VALUES (?, ?, ?, ?)`,
-      [empresaId, dto.nombre.trim(), dto.descripcion || null, userId ?? null],
+      `INSERT INTO hc_servicios (empresa_id, nombre, descripcion, precio, user_crea_id) VALUES (?, ?, ?, ?, ?)`,
+      [empresaId, dto.nombre.trim(), dto.descripcion || null, Number(dto.precio) || 0, userId ?? null],
     );
-    const [rows] = await pool().query<any[]>('SELECT id, nombre, descripcion, activo FROM hc_servicios WHERE id = ?', [res.insertId]);
+    const [rows] = await pool().query<any[]>('SELECT id, nombre, descripcion, precio, activo FROM hc_servicios WHERE id = ?', [res.insertId]);
     return rows[0];
   },
 
@@ -607,12 +619,13 @@ export const historiasRepo = {
     const set = (c: string, v: any) => { campos.push(`${c} = ?`); vals.push(v); };
     if (dto.nombre !== undefined)      set('nombre', dto.nombre.trim());
     if (dto.descripcion !== undefined) set('descripcion', dto.descripcion || null);
+    if (dto.precio !== undefined)      set('precio', Number(dto.precio) || 0);
     if (dto.activo !== undefined)      set('activo', dto.activo ? 1 : 0);
     if (!campos.length) return null;
     vals.push(empresaId, id);
     const [res] = await pool().query<any>(`UPDATE hc_servicios SET ${campos.join(', ')} WHERE empresa_id = ? AND id = ?`, vals);
     if (!res.affectedRows) return null;
-    const [rows] = await pool().query<any[]>('SELECT id, nombre, descripcion, activo FROM hc_servicios WHERE id = ?', [id]);
+    const [rows] = await pool().query<any[]>('SELECT id, nombre, descripcion, precio, activo FROM hc_servicios WHERE id = ?', [id]);
     return rows[0];
   },
 
@@ -639,6 +652,27 @@ export const historiasRepo = {
       );
     }
     return this.getServiciosDeTerapeuta(tenantSlug, terapeutaId);
+  },
+
+  /** ¿El terapeuta tiene asignación ACTIVA sobre este paciente? (control de acceso). */
+  async terapeutaAsignadoAPaciente(tenantSlug: string, terapeutaId: number, pacienteId: number): Promise<boolean> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT 1 FROM hc_asignaciones
+        WHERE empresa_id = ? AND terapeuta_id = ? AND paciente_id = ? AND activo = 1 LIMIT 1`,
+      [empresaId, terapeutaId, pacienteId],
+    );
+    return rows.length > 0;
+  },
+
+  /** paciente_id dueño de una historia (para resolver acceso en rutas por historia_id). */
+  async pacienteDeHistoria(tenantSlug: string, historiaId: number): Promise<number | null> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      'SELECT paciente_id FROM hc_historias WHERE empresa_id = ? AND id = ? LIMIT 1',
+      [empresaId, historiaId],
+    );
+    return rows[0]?.paciente_id ?? null;
   },
 
   // ── Asignación paciente ↔ terapeuta (por servicio) ────────────────────────────

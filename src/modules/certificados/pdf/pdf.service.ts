@@ -172,127 +172,134 @@ function imagenABuffer(src: string | null | undefined): ImagenBuffer | null {
 }
 
 function pintarActa(doc: any, datos: PdfActaDatos, qrDataUrl?: string, codigo?: string): void {
-  const left     = doc.page.margins.left;
-  const right    = doc.page.width - doc.page.margins.right;
+  const W = 841.89, H = 595.28;
+  const PX = 0.75;
+  const left  = 60 * PX;              // padding: 60px en React → 45pt
+  const right = W - 60 * PX;
+  const top   = 46 * PX;              // padding-top: 46px → 34.5pt
   const contentW = right - left;
-  const topY     = doc.page.margins.top;
+
+  const NAVY = '#12294d';
   const esCreditos = !!datos.es_creditos;
 
-  const fechaIni = fmtFecha(datos.fecha_inicio);
-  const fechaFin = fmtFecha(datos.fecha_fin);
+  // ── TÍTULO ────────────────────────────────────────────────
+  doc.font('Helvetica-Bold').fontSize(26 * PX)  // 26px → 19.5pt
+     .fillColor(NAVY)
+     .text(esCreditos ? 'ACTA DE CRÉDITOS' : 'ACTA DE NOTAS', left, top,
+           { width: contentW, align: 'center', characterSpacing: 0.5 });
 
-  // ── QR de validación (mismo del certificado) en el encabezado, a la derecha ──
-  // Va DENTRO del acta (arriba-derecha), integrado al encabezado. Reservamos ese
-  // ancho para que los datos del alumno no se le encimen.
-  const ACTA_QR   = 66;
-  const qrImg     = qrDataUrl ? imagenABuffer(qrDataUrl) : null;
-  const qrReserve = qrImg ? ACTA_QR + 16 : 0;
-  // El QR va DEBAJO de la línea decorativa (a la altura de los datos del alumno),
-  // no pegado arriba, para que no la cruce.
-  const qrTop     = topY + 46;
+  // Línea divisoria
+  const lineY = top + 26 * PX + 16 * PX;
+  doc.moveTo(left, lineY).lineTo(right, lineY)
+     .strokeColor('#d7dde5').lineWidth(0.75).stroke();
+
+  // ── BLOQUE DATOS + QR ─────────────────────────────────────
+  let y = lineY + 18 * PX;
+
+  // QR arriba-derecha (80px), alineado al bloque de datos y con margen hasta la tabla
+  const QR = 80 * PX;
+  const qrImg = qrDataUrl ? imagenABuffer(qrDataUrl) : null;
   if (qrImg) {
-    doc.image(qrImg.data, right - ACTA_QR, qrTop, { width: ACTA_QR, height: ACTA_QR });
+    doc.image(qrImg.data, right - QR, y, { width: QR, height: QR });
     if (codigo) {
-      doc.font('Courier').fontSize(7).fillColor('#94a3b8')
-        .text(codigo, right - ACTA_QR - 6, qrTop + ACTA_QR + 2, { width: ACTA_QR + 12, align: 'center', lineBreak: false });
+      doc.font('Courier').fontSize(6).fillColor('#94a3b8')
+         .text(codigo, right - QR, y + QR + 2, { width: QR, align: 'center', lineBreak: false });
     }
   }
 
-  // ── Encabezado (sin nombre de empresa: ya va en logos/footer) ──
-  doc.font('Helvetica-Bold').fontSize(18).fillColor('#0f172a')
-    .text(esCreditos ? 'ACTA DE CRÉDITOS' : 'ACTA DE NOTAS', left, topY + 4, { width: contentW, align: 'center' });
-  doc.moveTo(left, doc.y + 8).lineTo(right, doc.y + 8).strokeColor('#cbd5e1').lineWidth(1).stroke();
-  doc.moveDown(1.2);
+  const labelW = 100;
+  const valX   = left + labelW + 24 * PX;
+  const valW   = contentW - labelW - 24 * PX - (qrImg ? QR + 12 : 0);
 
-  // ── Datos del alumno / programa ──
-  // El ancho del valor deja libre la esquina del QR (a su altura).
-  const fila = (label: string, valor: string) => {
-    const y = doc.y;
-    const valW = contentW - 135 - (y < qrTop + ACTA_QR ? qrReserve : 0);
-    doc.font('Helvetica-Bold').fontSize(10).fillColor('#475569').text(label, left, y, { width: 130 });
-    doc.font('Helvetica').fontSize(10).fillColor('#0f172a').text(valor || '—', left + 135, y, { width: valW });
-    doc.moveDown(0.35);
+  const info = (label: string, valor: string) => {
+    const yy = doc.y;
+    doc.font('Helvetica-Bold').fontSize(13 * PX).fillColor('#0f172a')
+       .text(label, left, yy, { width: labelW });
+    doc.font('Helvetica').fontSize(13 * PX).fillColor('#334155')
+       .text(valor || '—', valX, yy, { width: valW });
+    doc.y = yy + 16 * PX;   // salto fijo como en el componente
   };
-  fila('Participante:', datos.participante_nombre);
-  fila('Documento:',    datos.numero_documento);
-  fila('Programa:',     datos.programa_nombre);
-  fila('Grupo:',        datos.nombre_grupo);
-  if (fechaIni || fechaFin) fila('Periodo:', `${fechaIni}${fechaIni && fechaFin ? ' al ' : ''}${fechaFin}`);
-  doc.moveDown(0.8);
+  doc.y = y;   // posición determinística (igual que el preview de la config): info arranca en `y`
+  info('Participante:', datos.participante_nombre);
+  info('Documento:',    datos.numero_documento);
+  info('Programa:',     datos.programa_nombre);
+  info('Grupo:',        datos.nombre_grupo);
+  info('Periodo:',      `${fmtFecha(datos.fecha_inicio)}${datos.fecha_inicio && datos.fecha_fin ? ' al ' : ''}${fmtFecha(datos.fecha_fin)}`);
+  // ↑ siempre se muestra, con '—' si vacío (igual que React)
 
-  // ── Tabla ──
-  const colNum    = 40;
-  const colValor  = 110;   // NOTA o CRÉDITOS
-  const colUnidad = contentW - colNum - colValor;
-  const rowH = 24;
-  let y = doc.y;
+  // ── TABLA ─────────────────────────────────────────────────
+  y = doc.y + 16 * PX;
 
-  doc.rect(left, y, contentW, rowH).fill('#0f172a');
-  doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(9.5);
-  const colNombreHdr = esCreditos ? 'TEMA' : datos.unidad_label.toUpperCase();
-  doc.text('N°',                              left + 6,                  y + 7, { width: colNum - 6 });
-  doc.text(colNombreHdr,                       left + colNum + 6,         y + 7, { width: colUnidad - 12 });
-  doc.text(esCreditos ? 'CRÉDITOS' : 'NOTA',   left + colNum + colUnidad, y + 7, { width: colValor, align: 'center' });
+  const colNum   = 60 * PX;
+  const colValor = 140 * PX;
+  const colUni   = contentW - colNum - colValor;
+  const rowH     = 24;
+
+  // Header
+  doc.rect(left, y, contentW, rowH).fill(NAVY);
+  doc.fillColor('#ffffff').font('Helvetica-Bold').fontSize(12 * PX);
+  doc.text('N°',      left + 14 * PX,             y + 7, { width: colNum });
+  doc.text(esCreditos ? 'TEMA' : datos.unidad_label.toUpperCase(),
+           left + colNum + 14 * PX,                y + 7, { width: colUni - 28 * PX });
+  doc.text(esCreditos ? 'CRÉDITOS' : 'NOTA',
+           left + colNum + colUni,                 y + 7, { width: colValor - 14 * PX, align: 'right' });
   y += rowH;
 
   const unidadesOrden = [...datos.unidades].sort((a, b) => a.orden - b.orden);
-  const padY = 7;   // relleno arriba/abajo del texto dentro de la fila
   unidadesOrden.forEach((u, i) => {
-    // La fila se ADAPTA: si el nombre del tema es largo, se parte en varias líneas y
-    // la altura de la fila crece para que no se encime con la siguiente.
-    doc.font('Helvetica').fontSize(10);
-    const nombre = u.nombre ?? '';
-    const nombreH = doc.heightOfString(nombre, { width: colUnidad - 12 });
-    const rowHi = Math.max(rowH, nombreH + padY * 2);
-    if (i % 2 === 0) doc.rect(left, y, contentW, rowHi).fill('#f8fafc');
-    doc.fillColor('#334155').font('Helvetica').fontSize(10)
-      .text(String(i + 1), left + 6, y + padY, { width: colNum - 6 });
-    doc.fillColor('#0f172a').text(nombre, left + colNum + 6, y + padY, { width: colUnidad - 12 });
-    const valorTxt = esCreditos
+    doc.font('Helvetica').fontSize(13 * PX);
+    const nombre  = u.nombre ?? '';
+    const nombreH = doc.heightOfString(nombre, { width: colUni - 28 * PX });
+    const rowHi   = Math.max(24, nombreH + 16 * PX);
+
+    // Fondo alterno: pares blancos, impares #f6f8fb (igual que React i%2===0 ? '#fff' : '#f6f8fb')
+    doc.rect(left, y, contentW, rowHi).fill(i % 2 === 0 ? '#ffffff' : '#f6f8fb');
+
+    // N° en azul #2563eb
+    doc.fillColor('#2563eb').font('Helvetica-Bold').fontSize(13 * PX)
+       .text(String(i + 1), left + 14 * PX, y + 8 * PX, { width: colNum });
+
+    doc.fillColor('#0f172a').font('Helvetica').fontSize(13 * PX)
+       .text(nombre, left + colNum + 14 * PX, y + 8 * PX, { width: colUni - 28 * PX });
+
+    const valor = esCreditos
       ? String(Number(u.creditos ?? 0))
       : (u.nota == null ? '—' : u.nota.toFixed(2));
     doc.font('Helvetica-Bold').fillColor('#0f172a')
-      .text(valorTxt, left + colNum + colUnidad, y + padY, { width: colValor, align: 'center' });
-    doc.font('Helvetica');
+       .text(valor, left + colNum + colUni, y + 8 * PX,
+             { width: colValor - 14 * PX, align: 'right' });
+
     y += rowHi;
   });
-  doc.moveTo(left, y).lineTo(right, y).strokeColor('#e2e8f0').lineWidth(1).stroke();
 
-  // ── Resumen final ──
-  y += 18;
+  // ── RESUMEN ───────────────────────────────────────────────
+  y += 18 * PX;
   if (esCreditos) {
-    // Modo créditos: total de créditos + condición por asistencia (aprobado = 3).
     const totalCred = datos.total_creditos ?? unidadesOrden.reduce((s, u) => s + Number(u.creditos ?? 0), 0);
-    const condicion = datos.aprobado ? 'APROBADO' : 'PENDIENTE';
-    const condColor = datos.aprobado ? '#15803d' : '#92400e';
-    doc.font('Helvetica-Bold').fontSize(12).fillColor('#475569')
-      .text('Total de créditos: ', left, y, { continued: true })
-      .fillColor('#0f172a').text(String(Number(totalCred)));
-    doc.font('Helvetica').fontSize(9.5).fillColor('#94a3b8')
-      .text('Los créditos se otorgan por asistencia al programa.', left, doc.y + 2);
-    doc.moveDown(0.6);
-    doc.font('Helvetica-Bold').fontSize(13).fillColor(condColor)
-      .text(`Condición: ${condicion}`, left, doc.y);
+    const cond = datos.aprobado ? 'APROBADO' : 'PENDIENTE';
+    const color = datos.aprobado ? '#15803d' : '#b91c1c';
+    doc.font('Helvetica-Bold').fontSize(13 * PX).fillColor('#0f172a')
+       .text(`Promedio final: —`, left, y);  // o "Total créditos"
+    // … replica exactamente lo del componente
+    doc.font('Helvetica').fontSize(11 * PX).fillColor('#94a3b8')
+       .text(`(Nota mínima de aprobación: ${datos.nota_minima.toFixed(2)} · escala 0–20)`, left, y + 16 * PX);
+    doc.font('Helvetica-Bold').fontSize(15 * PX).fillColor(color)
+       .text(`Condición: ${cond}`, left, y + 32 * PX);
   } else {
-    const promedioTxt = datos.promedio == null ? '—' : datos.promedio.toFixed(2);
-    const condicion   = !datos.completo ? 'PENDIENTE (faltan notas)' : datos.aprobado ? 'APROBADO' : 'DESAPROBADO';
-    const condColor   = !datos.completo ? '#92400e' : datos.aprobado ? '#15803d' : '#b91c1c';
+    const promTxt = datos.promedio == null ? '—' : datos.promedio.toFixed(2);
+    const cond = !datos.completo ? 'PENDIENTE (faltan notas)'
+              : datos.aprobado ? 'APROBADO' : 'DESAPROBADO';
+    const color = !datos.completo ? '#92400e'
+              : datos.aprobado ? '#15803d' : '#b91c1c';
 
-    doc.font('Helvetica-Bold').fontSize(11).fillColor('#475569')
-      .text('Promedio final: ', left, y, { continued: true })
-      .fillColor('#0f172a').text(promedioTxt);
-    doc.font('Helvetica').fontSize(9.5).fillColor('#94a3b8')
-      .text(`(Nota mínima de aprobación: ${datos.nota_minima.toFixed(2)} · escala 0–20)`, left, doc.y + 2);
-    doc.moveDown(0.6);
-    doc.font('Helvetica-Bold').fontSize(13).fillColor(condColor)
-      .text(`Condición: ${condicion}`, left, doc.y);
+    doc.font('Helvetica-Bold').fontSize(13 * PX).fillColor('#0f172a')
+       .text(`Promedio final: ${promTxt}`, left, y);
+    doc.font('Helvetica').fontSize(11 * PX).fillColor('#94a3b8')
+       .text(`(Nota mínima de aprobación: ${datos.nota_minima.toFixed(2)} · escala 0–20)`,
+             left, y + 16 * PX);
+    doc.font('Helvetica-Bold').fontSize(15 * PX).fillColor(color)
+       .text(`Condición: ${cond}`, left, y + 32 * PX);
   }
-
-  // ── Footer ──
-  const footerY = doc.page.height - doc.page.margins.bottom - 24;
-  doc.font('Helvetica').fontSize(8).fillColor('#9ca3af')
-    .text(esCreditos ? 'Acta de créditos' : 'Acta de notas',
-      left, footerY, { width: contentW, align: 'center', lineBreak: false });
 }
 
 /* ── Preparación de QR + cuerpo (común a archivo y buffer) ───── */
@@ -450,7 +457,8 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
   const layout = parseLayout(datos.layout_personalizado);
   if (layout && layoutActivo(datos.layout_personalizado)) {
     // Si hay acta, el QR va solo en el acta: pasamos '' para que el lienzo no lo dibuje.
-    pintarLienzo(doc, datos, tieneActa ? '' : qrDataUrl, vars, layout, { W, H, PX, imagenABuffer });
+    // Solo se pintan los campos de la HOJA 1 (los de la hoja 2 van sobre el acta).
+    pintarLienzo(doc, datos, tieneActa ? '' : qrDataUrl, vars, layout, { W, H, PX, imagenABuffer }, { pagina: 1 });
   } else {
         // ── FONDO ────────────────────────────────────────────
         const fondo = imagenABuffer(datos.plantilla_url);
@@ -611,9 +619,19 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
 
         // ── PÁGINA 2: ACTA DE NOTAS ───────────────────────────
         // Común a ambos modos: el acta de notas no depende del diseño del certificado.
-        if (datos.acta && datos.acta.unidades.length > 0) {
+        if (datos.acta) {
           doc.addPage({ size: 'A4', layout: 'landscape', margin: 50 });
-          pintarActa(doc, datos.acta, qrDataUrl, datos.codigo_unico);
+          // ¿La clienta puso el QR (movible) en la hoja 2? Entonces el acta NO dibuja su
+          // QR fijo: lo pinta el lienzo en la posición elegida. Si no, el acta usa el suyo.
+          const qrCampo = layout && layoutActivo(datos.layout_personalizado)
+            ? (layout.campos?.['qr'] as { on?: boolean; pagina?: number } | undefined)
+            : undefined;
+          const qrEnHoja2 = !!qrCampo && qrCampo.on !== false && (qrCampo.pagina === 2 ? 2 : 1) === 2;
+          pintarActa(doc, datos.acta, qrEnHoja2 ? undefined : qrDataUrl, datos.codigo_unico);
+          // Cositas de la HOJA 2 (logos de convenios, textos, QR movible…) SOBRE el acta.
+          if (layout && layoutActivo(datos.layout_personalizado)) {
+            pintarLienzo(doc, datos, qrDataUrl, vars, layout, { W, H, PX, imagenABuffer }, { pagina: 2, sinFondo: true });
+          }
         }
 }
 

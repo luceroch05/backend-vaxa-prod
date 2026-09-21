@@ -150,6 +150,34 @@ function auditar(req: Request, res: Response, next: NextFunction): void {
 }
 router.use(auditar);
 
+/** Control de acceso del TERAPEUTA: solo puede tocar pacientes que tenga asignados.
+ *  ADMINISTRADOR y ADMISION pasan sin restricción. Resuelve el paciente por la ruta
+ *  (por paciente_id directo, o por historia_id) y devuelve 403 si no está asignado.
+ *  Rutas no ligadas a un paciente concreto (catálogos, listados, /existe) pasan. */
+async function accesoTerapeuta(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (rol(req) !== 'TERAPEUTA') { next(); return; }
+  const terapeutaId = uid(req);
+  if (!terapeutaId) { next(); return; }   // el jwtMiddleware ya cubre la autenticación
+  try {
+    const segs = req.path.split('/').filter(Boolean);
+    let pacienteId: number | undefined;
+    if (segs[0] === 'pacientes' && Number.isFinite(Number(segs[1]))) {
+      pacienteId = Number(segs[1]);
+    } else if (segs[0] === 'historias' && Number.isFinite(Number(segs[1]))) {
+      const p = await historiasRepo.pacienteDeHistoria(tid(req), Number(segs[1]));
+      pacienteId = p ?? undefined;
+    }
+    if (pacienteId === undefined) { next(); return; }   // ruta sin paciente concreto
+    const ok = await historiasRepo.terapeutaAsignadoAPaciente(tid(req), terapeutaId, pacienteId);
+    if (!ok) {
+      res.status(403).json({ error: 'No tienes asignado a este paciente.', code: 'PACIENTE_NO_ASIGNADO' });
+      return;
+    }
+    next();
+  } catch (e) { sendError(res, e, 'historias'); }
+}
+router.use(accesoTerapeuta);
+
 // ── Catálogos ────────────────────────────────────────────────────────────────
 router.get('/catalogos', w(async (_req, res) => {
   res.json(await historiasRepo.catalogos());
@@ -168,7 +196,9 @@ router.get('/auditoria', soloAdmin, w(async (req, res) => {
 // ── Pacientes ────────────────────────────────────────────────────────────────
 router.get('/pacientes', w(async (req, res) => {
   const incluirInactivos = req.query.todos === '1' || req.query.todos === 'true';
-  res.json(await historiasRepo.listPacientes(tid(req), incluirInactivos));
+  // El TERAPEUTA solo ve a sus pacientes asignados; ADMINISTRADOR y ADMISION ven todos.
+  const soloAsignados = rol(req) === 'TERAPEUTA' ? uid(req) : undefined;
+  res.json(await historiasRepo.listPacientes(tid(req), incluirInactivos, soloAsignados));
 }));
 
 // Verifica si un documento ya está registrado (para avisar al llenar el input).

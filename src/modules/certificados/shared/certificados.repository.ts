@@ -2314,30 +2314,93 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
     const fechaDia3 = aYmdOpt(cert.fecha_dia3);
 
     // Acta de notas (2ª página) — solo si el programa tiene unidades configuradas.
-    let acta: any = null;
+  // Acta de notas (2ª página).
+let acta: any = null;
+if (cert.inscripcion_id) {
+  const ad: any = await notasRepo.actaData(tenantSlug, cert.inscripcion_id);
+  if (ad && ad.unidades.length > 0) {
+    acta = {
+      inscripcion_id:      ad.inscripcion_id,
+      participante_nombre: ad.participante_nombre,
+      numero_documento:    ad.numero_documento,
+      programa_nombre:     ad.programa_nombre,
+      nombre_grupo:        ad.nombre_grupo,
+      unidad_label:        ad.unidad_label,
+      es_creditos:         ad.es_creditos,
+      total_creditos:      ad.total_creditos,
+      nota_minima:         Number(ad.nota_minima),
+      fecha_inicio:        fechaInicio,
+      fecha_fin:           fechaFin,
+      empresa_nombre:      cert.tenant_slug ?? tenantSlug,
+      unidades:            ad.unidades,
+      promedio:            ad.promedio,
+      completo:            ad.completo,
+      aprobado:            ad.aprobado,
+    };
+  }
+}
+
+// 🚨 RED DE SEGURIDAD: si no hay acta pero el programa TIENE unidades,
+//    la armamos con datos reales (notas vacías si aún no hay).
+if (!acta && cert.programa_id) {
+  const empresaIdNum = cert.empresa_id ?? await getEmpresaId(tenantSlug);
+
+  const [uniRows] = await pool().query<any[]>(
+    `SELECT id, nombre, orden, creditos FROM unidades
+      WHERE programa_id = ? AND empresa_id = ? AND activo = 1
+      ORDER BY orden, id`,
+    [cert.programa_id, empresaIdNum],
+  );
+  const unidades = (uniRows as any[]);
+
+  if (unidades.length > 0) {
+    const [progRows] = await pool().query<any[]>(
+      `SELECT nombre, unidad_label, nota_minima FROM programas WHERE id = ?`,
+      [cert.programa_id],
+    );
+    const prog = (progRows as any[])[0];
+    const esCreditos = (prog?.unidad_label ?? '').trim() === 'Crédito';
+
+    // Notas reales si existen para esta inscripción
+    const notasMap = new Map<number, number | null>();
     if (cert.inscripcion_id) {
-      const ad: any = await notasRepo.actaData(tenantSlug, cert.inscripcion_id);
-      if (ad && ad.unidades.length > 0) {
-        acta = {
-          inscripcion_id:      ad.inscripcion_id,
-          participante_nombre: ad.participante_nombre,
-          numero_documento:    ad.numero_documento,
-          programa_nombre:     ad.programa_nombre,
-          nombre_grupo:        ad.nombre_grupo,
-          unidad_label:        ad.unidad_label,
-          es_creditos:         ad.es_creditos,
-          total_creditos:      ad.total_creditos,
-          nota_minima:         Number(ad.nota_minima),
-          fecha_inicio:        fechaInicio,
-          fecha_fin:           fechaFin,
-          empresa_nombre:      cert.tenant_slug ?? tenantSlug,
-          unidades:            ad.unidades,
-          promedio:            ad.promedio,
-          completo:            ad.completo,
-          aprobado:            ad.aprobado,
-        };
-      }
+      const [nr] = await pool().query<any[]>(
+        'SELECT unidad_id, nota FROM notas WHERE inscripcion_id = ?',
+        [cert.inscripcion_id],
+      );
+      (nr as any[]).forEach(n => notasMap.set(n.unidad_id, Number(n.nota)));
     }
+
+    const valores = [...notasMap.values()].filter(v => v != null) as number[];
+    const promedio = valores.length
+      ? valores.reduce((a, b) => a + b, 0) / valores.length
+      : null;
+    const completo = valores.length >= unidades.length;
+
+    acta = {
+      inscripcion_id:      cert.inscripcion_id ?? 0,
+      participante_nombre: cert.participante_nombre ?? '—',
+      numero_documento:    cert.numero_documento ?? '—',
+      programa_nombre:     prog?.nombre ?? cert.programa_nombre ?? '—',
+      nombre_grupo:        cert.nombre_grupo ?? '—',
+      unidad_label:        prog?.unidad_label ?? 'Unidad',
+      es_creditos:         esCreditos,
+      total_creditos:      unidades.reduce((s, u) => s + Number(u.creditos ?? 0), 0),
+      nota_minima:         Number(prog?.nota_minima ?? 11),
+      fecha_inicio:        fechaInicio,
+      fecha_fin:           fechaFin,
+      empresa_nombre:      cert.tenant_slug ?? tenantSlug,
+      unidades: unidades.map(u => ({
+        id: u.id, nombre: u.nombre, orden: u.orden,
+        nota: notasMap.get(u.id) ?? null,
+        creditos: Number(u.creditos ?? 0),
+      })),
+      promedio,
+      completo,
+      aprobado: esCreditos ? null : (completo && promedio !== null ? promedio >= Number(prog?.nota_minima ?? 11) : null),
+    };
+  }
+}
 
     // Logos del cert. Logo DEFAULT obligatorio (planes Básico/Profesional): el
     // logo de la empresa (logo_url) SIEMPRE aparece, aunque la config no lo tenga

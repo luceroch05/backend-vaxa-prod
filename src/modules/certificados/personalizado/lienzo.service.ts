@@ -365,11 +365,11 @@ function dibujarSubrayado(
   const lx = c.align === 'left'  ? boxX
            : c.align === 'right' ? boxX + boxW - tw
            :                       boxX + (boxW - tw) / 2;   // center (default)
-  // Alto hasta el pie del texto: las líneas intermedias llevan el interlineado
-  // completo (1.2), pero la ÚLTIMA solo baja ~1.0 (base + descendente) para que la
-  // línea quede PEGADA al texto y no cuelgue el sobrante del interlineado.
-  const bottom = (c.y ?? 0) * PX + ((lineas.length - 1) * 1.2 + 1.0) * sizePt;   // borde inferior del texto
-  const uy = bottom + (c.underlineOffset ?? 6) * PX;
+  // Pie del texto = borde inferior de la caja de línea (interlineado 1.2), IGUAL que
+  // el front (span inline-block con line-height 1.2). Así la línea queda a la misma
+  // altura en preview y PDF, con aire (antes 1.0 la dejaba pegada al texto).
+  const bottom = (c.y ?? 0) * PX + (lineas.length * 1.2) * sizePt;   // borde inferior del texto
+  const uy = bottom + (c.underlineOffset ?? 10) * PX;
   doc.moveTo(lx, uy).lineTo(lx + tw, uy)
     .lineWidth((c.underlineThickness ?? 1.5) * PX)
     .strokeColor(c.underlineColor ?? c.color ?? '#0f172a').stroke();
@@ -388,21 +388,28 @@ export function pintarLienzo(
   vars: Record<string, string>,
   layout: LayoutLienzo,
   ctx: LienzoCtx,
+  opts: { pagina?: number; sinFondo?: boolean } = {},
 ): void {
   const { W, H, PX, imagenABuffer } = ctx;
   const reg = registrarFuentes(doc);
+  const targetPag = opts.pagina ?? 1;   // 1 = certificado, 2 = acta (2ª hoja)
 
   // ── FONDO (arte del cliente, a sangre completa) ──
-  const fondo = imagenABuffer(datos.plantilla_url);
-  if (fondo) {
-    try { doc.image(fondo.data, 0, 0, { width: W, height: H }); }
-    catch (e) { console.warn('[lienzo] Error fondo:', (e as Error).message); }
+  // En la hoja 2 (acta) NO se pinta el fondo del cert: el acta ya trae su propia hoja.
+  if (!opts.sinFondo) {
+    const fondo = imagenABuffer(datos.plantilla_url);
+    if (fondo) {
+      try { doc.image(fondo.data, 0, 0, { width: W, height: H }); }
+      catch (e) { console.warn('[lienzo] Error fondo:', (e as Error).message); }
+    }
   }
 
   // ── CAMPOS ──
   const campos = layout.campos ?? {};
   for (const [key, raw] of Object.entries(campos)) {
     if (!raw || (raw as CampoTexto | CampoQR | CampoLogo).on === false) continue;
+    // Solo los campos de esta hoja (pagina 1 = cert, 2 = acta). Sin marca = hoja 1.
+    if (((raw as { pagina?: number }).pagina === 2 ? 2 : 1) !== targetPag) continue;
 
     // LOGO (imagen de datos.logos por orden)
     if (/^logo\d+$/i.test(key)) {

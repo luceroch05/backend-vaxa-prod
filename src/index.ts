@@ -24,8 +24,10 @@ import { authRoutes } from './modules/auth/auth.routes';
 import { backofficeRoutes } from './modules/backoffice/backoffice.routes';
 import { pacientesRoutes } from './modules/pacientes/pacientes.routes';
 import { historiasRoutes } from './modules/historias/historias.routes';
+import { historiasFinanzasRoutes } from './modules/historias/historias.finanzas.routes';
 import { historiasPublicRoutes } from './modules/historias/historias.public.routes';
 import { webRoutes, webPublicRoutes } from './modules/web/web.routes';
+import { contactoPublicRoutes } from './modules/contacto/contacto.routes';
 import { dashboardRoutes } from './modules/dashboard/dashboard.routes';
 import { certificadosRoutes } from './modules/certificados/certificados.routes';
 import { publicCertificadosRoutes } from './modules/certificados/public/public.routes';
@@ -136,12 +138,24 @@ app.get(`${BASE_PATH}/public/vaxa-landing`, publicLimiter, async (_req, res) => 
   catch { res.json({}); }
 });
 
+/** Formulario de contacto de las landings (marca personal). Envía correo a Vaxa.
+ *  Límite ESTRICTO: es un envío de correo, hay que frenar el spam por IP. */
+const contactoLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 5,              // 5 envíos/min por IP
+  message: 'Has enviado demasiados mensajes. Espera un momento e inténtalo de nuevo.',
+});
+app.use(`${BASE_PATH}/public/contacto`, contactoLimiter, contactoPublicRoutes);
+
 /** Certificados: JWT + verificación de que el tenant del token == x-tenant-id */
 app.use(`${BASE_PATH}/api/certificados`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, certificadosRoutes);
 
 /** Historias Clínicas (centros terapéuticos): mismo stack que certificados —
  *  JWT + tenant del token == x-tenant-id + bloqueo por vencimiento de pago. */
 app.use(`${BASE_PATH}/api/historias`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, historiasRoutes);
+
+/** Finanzas del centro (Caja + Ventas + Inventario): mismo stack; solo ADMIN/ADMISION. */
+app.use(`${BASE_PATH}/api/historias`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, historiasFinanzasRoutes);
 
 /** Módulo "Mi Web" (contenido de la web pública editable): mismo stack que historias. */
 app.use(`${BASE_PATH}/api/web`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, webRoutes);
