@@ -403,7 +403,8 @@ async function prepararContenido(datos: PdfDatos): Promise<{ cuerpo: string; qrD
     tipo:         datos.tipo_programa,
     horas:        String(datos.horas_academicas),
     creditos:     datos.creditos ? String(datos.creditos) : '',
-    fecha:        fmtFecha(datos.fecha_emision),
+    fecha:        fmtFecha(datos.fecha_emision),   // alias legado; el chip visible es {fechaemision}
+    fechaemision: fmtFecha(datos.fecha_emision),
     fechaInicio:  fechaIni,
     fechaFin:     fechaFin,
     // Frase del periodo, ya resuelta según los días: "el 22 de agosto de 2026",
