@@ -202,6 +202,93 @@ router.put('/vaxa-landing', w(async (req, res) => {
   res.json(await adminRepo.saveVaxaLanding(req.body ?? {}));
 }));
 
+/** Alianzas de la landing pública de Vaxa (logos de aliados; editable desde sistemas-vaxa). */
+router.get('/vaxa-alianzas', w(async (_req, res) => {
+  res.json(await adminRepo.listVaxaAlianzas());
+}));
+router.post('/vaxa-alianzas', w(async (req, res) => {
+  res.status(201).json(await adminRepo.createVaxaAlianza(req.body ?? {}));
+}));
+router.patch('/vaxa-alianzas/:id', w(async (req, res) => {
+  const a = await adminRepo.updateVaxaAlianza(Number(req.params.id), req.body ?? {});
+  if (!a) { res.status(404).json({ error: 'Alianza no encontrada' }); return; }
+  res.json(a);
+}));
+router.delete('/vaxa-alianzas/:id', w(async (req, res) => {
+  const ok = await adminRepo.deleteVaxaAlianza(Number(req.params.id));
+  if (!ok) { res.status(404).json({ error: 'Alianza no encontrada' }); return; }
+  res.status(204).send();
+}));
+
+/** Testimonios de la landing pública de Vaxa (comentarios reales; editable desde sistemas-vaxa). */
+router.get('/vaxa-testimonios', w(async (_req, res) => {
+  res.json(await adminRepo.listVaxaTestimonios());
+}));
+router.post('/vaxa-testimonios', w(async (req, res) => {
+  res.status(201).json(await adminRepo.createVaxaTestimonio(req.body ?? {}));
+}));
+router.patch('/vaxa-testimonios/:id', w(async (req, res) => {
+  const t = await adminRepo.updateVaxaTestimonio(Number(req.params.id), req.body ?? {});
+  if (!t) { res.status(404).json({ error: 'Testimonio no encontrado' }); return; }
+  res.json(t);
+}));
+router.delete('/vaxa-testimonios/:id', w(async (req, res) => {
+  const ok = await adminRepo.deleteVaxaTestimonio(Number(req.params.id));
+  if (!ok) { res.status(404).json({ error: 'Testimonio no encontrado' }); return; }
+  res.status(204).send();
+}));
+
+/** Infraestructura (interno Vaxa): recursos propios (VPS/dominios/hosting). */
+router.get('/infra-recursos', w(async (_req, res) => {
+  res.json(await adminRepo.listInfraRecursos());
+}));
+router.post('/infra-recursos', w(async (req, res) => {
+  res.status(201).json(await adminRepo.createInfraRecurso(req.body ?? {}, uid(req)));
+}));
+router.patch('/infra-recursos/:id', w(async (req, res) => {
+  const r = await adminRepo.updateInfraRecurso(Number(req.params.id), req.body ?? {}, uid(req));
+  if (!r) { res.status(404).json({ error: 'Recurso no encontrado' }); return; }
+  res.json(r);
+}));
+router.delete('/infra-recursos/:id', w(async (req, res) => {
+  const ok = await adminRepo.deleteInfraRecurso(Number(req.params.id));
+  if (!ok) { res.status(404).json({ error: 'Recurso no encontrado' }); return; }
+  res.status(204).send();
+}));
+
+/** Infraestructura: alquileres/servicios que le cobras a un cliente. */
+router.get('/infra-alquileres', w(async (_req, res) => {
+  res.json(await adminRepo.listInfraAlquileres());
+}));
+router.post('/infra-alquileres', w(async (req, res) => {
+  res.status(201).json(await adminRepo.createInfraAlquiler(req.body ?? {}, uid(req)));
+}));
+router.patch('/infra-alquileres/:id', w(async (req, res) => {
+  const a = await adminRepo.updateInfraAlquiler(Number(req.params.id), req.body ?? {}, uid(req));
+  if (!a) { res.status(404).json({ error: 'Alquiler no encontrado' }); return; }
+  res.json(a);
+}));
+router.delete('/infra-alquileres/:id', w(async (req, res) => {
+  const ok = await adminRepo.deleteInfraAlquiler(Number(req.params.id));
+  if (!ok) { res.status(404).json({ error: 'Alquiler no encontrado' }); return; }
+  res.status(204).send();
+}));
+/** Registra el cobro de un alquiler y corre el próximo cobro al siguiente ciclo. */
+router.post('/infra-alquileres/:id/cobrar', w(async (req, res) => {
+  const a = await adminRepo.registrarCobroAlquiler(Number(req.params.id), uid(req));
+  if (!a) { res.status(404).json({ error: 'Alquiler no encontrado' }); return; }
+  res.json(a);
+}));
+
+/** Infraestructura: alertas de cobro (para la campana de notificaciones). */
+router.get('/infra-alertas', w(async (_req, res) => {
+  res.json(await adminRepo.alertasCobro(7));
+}));
+/** Infraestructura: envía YA el correo-resumen de cobros a info@vaxa.com.pe. */
+router.post('/infra-avisos/enviar', w(async (_req, res) => {
+  res.json(await adminRepo.procesarAvisosCobro(true));
+}));
+
 /** Roles (para el selector al crear usuario) */
 router.get('/roles', w(async (_req, res) => {
   res.json(await adminRepo.listRoles());

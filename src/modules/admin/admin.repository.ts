@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import { getPool } from '../../db/pool';
 import { planRepo } from '../certificados/planes/plan.repository';
 import { guardarImagen } from '../../shared/imagenes';
+import { enviarCorreo, CONTACTO_TO } from '../../shared/mailer';
 
 function pool() {
   const p = getPool();
@@ -116,6 +117,137 @@ async function ensureVaxaLanding(): Promise<void> {
 }
 
 const LANDING_CAMPOS = ['facebook', 'instagram', 'tiktok', 'youtube', 'linkedin', 'whatsapp', 'email', 'telefono'] as const;
+
+/**
+ * Auto-crea la tabla `vaxa_alianzas` (aliados/convenios que salen en la landing
+ * pública de Vaxa). Editable desde sistemas-vaxa. El logo se guarda como ARCHIVO
+ * en /uploads/vaxa (la BD solo tiene la ruta, no base64). Se crea sola, sin
+ * migración manual, igual que `vaxa_landing`.
+ */
+let _ensuredVaxaAlianzas = false;
+async function ensureVaxaAlianzas(): Promise<void> {
+  if (_ensuredVaxaAlianzas) return;
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS vaxa_alianzas (
+       id       INT AUTO_INCREMENT PRIMARY KEY,
+       nombre   VARCHAR(200) NOT NULL,
+       logo_url VARCHAR(400) NULL,
+       link     VARCHAR(400) NULL,
+       orden    INT          NOT NULL DEFAULT 0,
+       activo   TINYINT(1)   NOT NULL DEFAULT 1,
+       creado   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  _ensuredVaxaAlianzas = true;
+}
+
+const ALIANZA_COLS = 'id, nombre, logo_url, link, orden, activo';
+
+/**
+ * Auto-crea la tabla `vaxa_testimonios` (comentarios reales de clientes que salen
+ * en la landing pública de Vaxa). El testimonio NO guarda foto de la persona:
+ * se enlaza a una alianza (`alianza_id`) y reutiliza su logo. Se crea sola, sin
+ * migración manual, igual que `vaxa_alianzas`.
+ */
+let _ensuredVaxaTestimonios = false;
+async function ensureVaxaTestimonios(): Promise<void> {
+  if (_ensuredVaxaTestimonios) return;
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS vaxa_testimonios (
+       id           INT AUTO_INCREMENT PRIMARY KEY,
+       comentario   TEXT         NOT NULL,
+       autor        VARCHAR(200) NOT NULL,
+       cargo        VARCHAR(200) NULL,
+       empresa      VARCHAR(200) NULL,
+       alianza_id   INT          NULL,
+       calificacion TINYINT      NOT NULL DEFAULT 5,
+       orden        INT          NOT NULL DEFAULT 0,
+       activo       TINYINT(1)   NOT NULL DEFAULT 1,
+       creado       TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  _ensuredVaxaTestimonios = true;
+}
+
+/**
+ * Auto-crea las tablas del módulo Infraestructura (uso interno de Vaxa, solo ADMIN):
+ *  - `infra_recursos`   = activos propios (VPS/dominios/hosting) con lo que TÚ pagas al proveedor.
+ *  - `infra_alquileres` = lo que le cobras/alquilas a un cliente (con su próximo cobro).
+ * Incluye los campos fijos de auditoría (activo, user_crea_id, user_actua_id, created_at, updated_at).
+ */
+let _ensuredInfra = false;
+async function ensureInfra(): Promise<void> {
+  if (_ensuredInfra) return;
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS infra_recursos (
+       id               INT AUTO_INCREMENT PRIMARY KEY,
+       tipo             VARCHAR(40)   NOT NULL DEFAULT 'Hosting',
+       nombre           VARCHAR(200)  NOT NULL,
+       proveedor        VARCHAR(150)  NULL,
+       costo            DECIMAL(10,2) NOT NULL DEFAULT 0,
+       moneda           VARCHAR(8)    NOT NULL DEFAULT 'PEN',
+       ciclo            VARCHAR(20)   NOT NULL DEFAULT 'mensual',
+       fecha_renovacion DATE          NULL,
+       proyectos        TEXT          NULL,
+       credenciales     TEXT          NULL,
+       notas            TEXT          NULL,
+       activo           TINYINT(1)    NOT NULL DEFAULT 1,
+       user_crea_id     INT           DEFAULT NULL,
+       user_actua_id    INT           DEFAULT NULL,
+       created_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at       DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS infra_alquileres (
+       id            INT AUTO_INCREMENT PRIMARY KEY,
+       cliente       VARCHAR(200)  NULL,
+       empresa_id    INT           NULL,
+       recurso_id    INT           NULL,
+       descripcion   VARCHAR(250)  NULL,
+       precio        DECIMAL(10,2) NOT NULL DEFAULT 0,
+       moneda        VARCHAR(8)    NOT NULL DEFAULT 'PEN',
+       ciclo         VARCHAR(20)   NOT NULL DEFAULT 'mensual',
+       fecha_inicio  DATE          NULL,
+       proximo_cobro DATE          NULL,
+       ultimo_cobro  DATE          NULL,
+       estado_pago   VARCHAR(20)   NOT NULL DEFAULT 'pendiente',
+       notas         TEXT          NULL,
+       activo        TINYINT(1)    NOT NULL DEFAULT 1,
+       user_crea_id  INT           DEFAULT NULL,
+       user_actua_id INT           DEFAULT NULL,
+       created_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS infra_meta (
+       clave VARCHAR(60) PRIMARY KEY,
+       valor VARCHAR(255) NULL
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  // Migración suave: agrega columnas nuevas a tablas ya creadas (ignora "columna duplicada").
+  await addColIfMissing('infra_recursos', 'proyectos', 'TEXT NULL AFTER fecha_renovacion');
+  await addColIfMissing('infra_alquileres', 'ultimo_cobro', 'DATE NULL AFTER proximo_cobro');
+  _ensuredInfra = true;
+}
+
+/** Fecha local (Lima) en 'YYYY-MM-DD'. */
+function hoyYmd(): string {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+/** ALTER TABLE ADD COLUMN idempotente (ignora ER_DUP_FIELDNAME 1060). */
+async function addColIfMissing(tabla: string, col: string, def: string): Promise<void> {
+  try {
+    await pool().query(`ALTER TABLE ${tabla} ADD COLUMN ${col} ${def}`);
+  } catch (e: any) {
+    if (e?.code !== 'ER_DUP_FIELDNAME') throw e;
+  }
+}
+
+const RECURSO_COLS = 'id, tipo, nombre, proveedor, costo, moneda, ciclo, fecha_renovacion, proyectos, credenciales, notas, activo, user_crea_id, user_actua_id, created_at, updated_at';
 
 export interface CrearEmpresaDto {
   razon_social: string;
@@ -595,6 +727,386 @@ export const adminRepo = {
     });
     await pool().query(`UPDATE vaxa_landing SET ${sets} WHERE id = 1`, vals);
     return this.getVaxaLanding();
+  },
+
+  /** Alianzas de la landing de Vaxa. `soloActivas` para la lectura pública. */
+  async listVaxaAlianzas(soloActivas = false) {
+    await ensureVaxaAlianzas();
+    const [rows] = await pool().query<any[]>(
+      `SELECT ${ALIANZA_COLS} FROM vaxa_alianzas${soloActivas ? ' WHERE activo = 1' : ''} ORDER BY orden, id`,
+    );
+    return rows;
+  },
+
+  /** Crea una alianza. El logo (data URL) se guarda como archivo PNG en /uploads/vaxa. */
+  async createVaxaAlianza(dto: Record<string, unknown>) {
+    await ensureVaxaAlianzas();
+    const nombre = String(dto?.nombre ?? '').trim();
+    if (!nombre) throw new Error('El nombre es requerido');
+    const logo = guardarImagen(dto?.logo_url as any, 'vaxa') ?? null;
+    const link = dto?.link ? String(dto.link).trim() || null : null;
+    const orden = Number(dto?.orden) || 0;
+    const activo = dto?.activo === false || dto?.activo === 0 ? 0 : 1;
+    const [res] = await pool().query<any>(
+      `INSERT INTO vaxa_alianzas (nombre, logo_url, link, orden, activo) VALUES (?, ?, ?, ?, ?)`,
+      [nombre, logo, link, orden, activo],
+    );
+    const [rows] = await pool().query<any[]>(`SELECT ${ALIANZA_COLS} FROM vaxa_alianzas WHERE id = ?`, [res.insertId]);
+    return rows[0];
+  },
+
+  /** Actualiza solo los campos enviados. El logo nuevo (data URL) se guarda como archivo. */
+  async updateVaxaAlianza(id: number, dto: Record<string, unknown>) {
+    await ensureVaxaAlianzas();
+    const fields: string[] = [];
+    const vals: any[] = [];
+    if (dto.nombre !== undefined)   { fields.push('nombre = ?');   vals.push(String(dto.nombre).trim()); }
+    if (dto.logo_url !== undefined) { fields.push('logo_url = ?'); vals.push(guardarImagen(dto.logo_url as any, 'vaxa') ?? null); }
+    if (dto.link !== undefined)     { fields.push('link = ?');     vals.push(dto.link ? String(dto.link).trim() || null : null); }
+    if (dto.orden !== undefined)    { fields.push('orden = ?');    vals.push(Number(dto.orden) || 0); }
+    if (dto.activo !== undefined)   { fields.push('activo = ?');   vals.push(dto.activo === false || dto.activo === 0 ? 0 : 1); }
+    if (fields.length) {
+      vals.push(id);
+      const [res] = await pool().query<any>(`UPDATE vaxa_alianzas SET ${fields.join(', ')} WHERE id = ?`, vals);
+      if (!res.affectedRows) return null;
+    }
+    const [rows] = await pool().query<any[]>(`SELECT ${ALIANZA_COLS} FROM vaxa_alianzas WHERE id = ?`, [id]);
+    return rows[0] ?? null;
+  },
+
+  async deleteVaxaAlianza(id: number) {
+    await ensureVaxaAlianzas();
+    const [res] = await pool().query<any>('DELETE FROM vaxa_alianzas WHERE id = ?', [id]);
+    return (res.affectedRows ?? 0) > 0;
+  },
+
+  /**
+   * Testimonios de la landing. Hace LEFT JOIN a `vaxa_alianzas` para resolver el
+   * logo de la empresa (reutilizado) y el nombre. `soloActivos` para lo público.
+   */
+  async listVaxaTestimonios(soloActivos = false) {
+    await ensureVaxaTestimonios();
+    await ensureVaxaAlianzas();
+    const [rows] = await pool().query<any[]>(
+      `SELECT t.id, t.comentario, t.autor, t.cargo,
+              COALESCE(t.empresa, a.nombre) AS empresa,
+              t.alianza_id, a.logo_url AS logo_url,
+              t.calificacion, t.orden, t.activo
+         FROM vaxa_testimonios t
+         LEFT JOIN vaxa_alianzas a ON a.id = t.alianza_id
+        ${soloActivos ? 'WHERE t.activo = 1' : ''}
+        ORDER BY t.orden, t.id`,
+    );
+    return rows;
+  },
+
+  async createVaxaTestimonio(dto: Record<string, unknown>) {
+    await ensureVaxaTestimonios();
+    const comentario = String(dto?.comentario ?? '').trim();
+    const autor = String(dto?.autor ?? '').trim();
+    if (!comentario) throw new Error('El comentario es requerido');
+    if (!autor) throw new Error('El autor es requerido');
+    const cargo = dto?.cargo ? String(dto.cargo).trim() || null : null;
+    const empresa = dto?.empresa ? String(dto.empresa).trim() || null : null;
+    const alianzaId = dto?.alianza_id ? Number(dto.alianza_id) || null : null;
+    const calificacion = Math.max(1, Math.min(5, Number(dto?.calificacion) || 5));
+    const orden = Number(dto?.orden) || 0;
+    const activo = dto?.activo === false || dto?.activo === 0 ? 0 : 1;
+    const [res] = await pool().query<any>(
+      `INSERT INTO vaxa_testimonios (comentario, autor, cargo, empresa, alianza_id, calificacion, orden, activo)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [comentario, autor, cargo, empresa, alianzaId, calificacion, orden, activo],
+    );
+    const list = await this.listVaxaTestimonios();
+    return list.find((r) => r.id === res.insertId) ?? null;
+  },
+
+  async updateVaxaTestimonio(id: number, dto: Record<string, unknown>) {
+    await ensureVaxaTestimonios();
+    const fields: string[] = [];
+    const vals: any[] = [];
+    if (dto.comentario !== undefined)   { fields.push('comentario = ?');   vals.push(String(dto.comentario).trim()); }
+    if (dto.autor !== undefined)        { fields.push('autor = ?');        vals.push(String(dto.autor).trim()); }
+    if (dto.cargo !== undefined)        { fields.push('cargo = ?');        vals.push(dto.cargo ? String(dto.cargo).trim() || null : null); }
+    if (dto.empresa !== undefined)      { fields.push('empresa = ?');      vals.push(dto.empresa ? String(dto.empresa).trim() || null : null); }
+    if (dto.alianza_id !== undefined)   { fields.push('alianza_id = ?');   vals.push(dto.alianza_id ? Number(dto.alianza_id) || null : null); }
+    if (dto.calificacion !== undefined) { fields.push('calificacion = ?'); vals.push(Math.max(1, Math.min(5, Number(dto.calificacion) || 5))); }
+    if (dto.orden !== undefined)        { fields.push('orden = ?');        vals.push(Number(dto.orden) || 0); }
+    if (dto.activo !== undefined)       { fields.push('activo = ?');       vals.push(dto.activo === false || dto.activo === 0 ? 0 : 1); }
+    if (fields.length) {
+      vals.push(id);
+      const [res] = await pool().query<any>(`UPDATE vaxa_testimonios SET ${fields.join(', ')} WHERE id = ?`, vals);
+      if (!res.affectedRows) return null;
+    }
+    const list = await this.listVaxaTestimonios();
+    return list.find((r) => r.id === id) ?? null;
+  },
+
+  async deleteVaxaTestimonio(id: number) {
+    await ensureVaxaTestimonios();
+    const [res] = await pool().query<any>('DELETE FROM vaxa_testimonios WHERE id = ?', [id]);
+    return (res.affectedRows ?? 0) > 0;
+  },
+
+  /* ── Infraestructura (interno Vaxa): recursos propios + alquileres a clientes ── */
+
+  /** Recursos propios (VPS/dominios/hosting). `soloActivos` para ocultar los dados de baja. */
+  async listInfraRecursos(soloActivos = false) {
+    await ensureInfra();
+    const [rows] = await pool().query<any[]>(
+      `SELECT ${RECURSO_COLS} FROM infra_recursos${soloActivos ? ' WHERE activo = 1' : ''} ORDER BY fecha_renovacion IS NULL, fecha_renovacion, id`,
+    );
+    return rows;
+  },
+
+  async createInfraRecurso(dto: Record<string, unknown>, uid?: number) {
+    await ensureInfra();
+    const nombre = String(dto?.nombre ?? '').trim();
+    if (!nombre) throw new Error('El nombre es requerido');
+    const [res] = await pool().query<any>(
+      `INSERT INTO infra_recursos (tipo, nombre, proveedor, costo, moneda, ciclo, fecha_renovacion, proyectos, credenciales, notas, activo, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        String(dto?.tipo ?? 'Hosting').trim() || 'Hosting',
+        nombre,
+        dto?.proveedor ? String(dto.proveedor).trim() || null : null,
+        Number(dto?.costo) || 0,
+        String(dto?.moneda ?? 'PEN').trim() || 'PEN',
+        String(dto?.ciclo ?? 'mensual').trim() || 'mensual',
+        dto?.fecha_renovacion ? String(dto.fecha_renovacion).slice(0, 10) : null,
+        dto?.proyectos ? String(dto.proyectos) : null,
+        dto?.credenciales ? String(dto.credenciales) : null,
+        dto?.notas ? String(dto.notas) : null,
+        dto?.activo === false || dto?.activo === 0 ? 0 : 1,
+        uid ?? null,
+      ],
+    );
+    const [rows] = await pool().query<any[]>(`SELECT ${RECURSO_COLS} FROM infra_recursos WHERE id = ?`, [res.insertId]);
+    return rows[0];
+  },
+
+  async updateInfraRecurso(id: number, dto: Record<string, unknown>, uid?: number) {
+    await ensureInfra();
+    const fields: string[] = [];
+    const vals: any[] = [];
+    if (dto.tipo !== undefined)             { fields.push('tipo = ?');             vals.push(String(dto.tipo).trim() || 'Hosting'); }
+    if (dto.nombre !== undefined)           { fields.push('nombre = ?');           vals.push(String(dto.nombre).trim()); }
+    if (dto.proveedor !== undefined)        { fields.push('proveedor = ?');        vals.push(dto.proveedor ? String(dto.proveedor).trim() || null : null); }
+    if (dto.costo !== undefined)            { fields.push('costo = ?');            vals.push(Number(dto.costo) || 0); }
+    if (dto.moneda !== undefined)           { fields.push('moneda = ?');           vals.push(String(dto.moneda).trim() || 'PEN'); }
+    if (dto.ciclo !== undefined)            { fields.push('ciclo = ?');            vals.push(String(dto.ciclo).trim() || 'mensual'); }
+    if (dto.fecha_renovacion !== undefined) { fields.push('fecha_renovacion = ?'); vals.push(dto.fecha_renovacion ? String(dto.fecha_renovacion).slice(0, 10) : null); }
+    if (dto.proyectos !== undefined)        { fields.push('proyectos = ?');        vals.push(dto.proyectos ? String(dto.proyectos) : null); }
+    if (dto.credenciales !== undefined)     { fields.push('credenciales = ?');     vals.push(dto.credenciales ? String(dto.credenciales) : null); }
+    if (dto.notas !== undefined)            { fields.push('notas = ?');            vals.push(dto.notas ? String(dto.notas) : null); }
+    if (dto.activo !== undefined)           { fields.push('activo = ?');           vals.push(dto.activo === false || dto.activo === 0 ? 0 : 1); }
+    fields.push('user_actua_id = ?'); vals.push(uid ?? null);
+    vals.push(id);
+    const [res] = await pool().query<any>(`UPDATE infra_recursos SET ${fields.join(', ')} WHERE id = ?`, vals);
+    if (!res.affectedRows) return null;
+    const [rows] = await pool().query<any[]>(`SELECT ${RECURSO_COLS} FROM infra_recursos WHERE id = ?`, [id]);
+    return rows[0] ?? null;
+  },
+
+  async deleteInfraRecurso(id: number) {
+    await ensureInfra();
+    const [res] = await pool().query<any>('DELETE FROM infra_recursos WHERE id = ?', [id]);
+    return (res.affectedRows ?? 0) > 0;
+  },
+
+  /** Alquileres a clientes. Hace LEFT JOIN al recurso (para el margen) y a la empresa (nombre). */
+  async listInfraAlquileres(soloActivos = false) {
+    await ensureInfra();
+    await ensureVaxaAlianzas(); // no-op de seguridad; empresas viene de su propia tabla
+    const [rows] = await pool().query<any[]>(
+      `SELECT al.id, al.cliente, al.empresa_id, al.recurso_id, al.descripcion,
+              al.precio, al.moneda, al.ciclo, al.fecha_inicio, al.proximo_cobro, al.ultimo_cobro,
+              al.estado_pago, al.notas, al.activo, al.user_crea_id, al.user_actua_id,
+              al.created_at, al.updated_at,
+              e.razon_social AS empresa_nombre,
+              r.nombre AS recurso_nombre, r.tipo AS recurso_tipo, r.costo AS recurso_costo
+         FROM infra_alquileres al
+         LEFT JOIN empresas e ON e.id = al.empresa_id
+         LEFT JOIN infra_recursos r ON r.id = al.recurso_id
+        ${soloActivos ? 'WHERE al.activo = 1' : ''}
+        ORDER BY al.proximo_cobro IS NULL, al.proximo_cobro, al.id`,
+    );
+    return rows;
+  },
+
+  async createInfraAlquiler(dto: Record<string, unknown>, uid?: number) {
+    await ensureInfra();
+    const cliente = dto?.cliente ? String(dto.cliente).trim() || null : null;
+    const empresaId = dto?.empresa_id ? Number(dto.empresa_id) || null : null;
+    if (!cliente && !empresaId) throw new Error('Indica el cliente (empresa o nombre)');
+    const [res] = await pool().query<any>(
+      `INSERT INTO infra_alquileres (cliente, empresa_id, recurso_id, descripcion, precio, moneda, ciclo, fecha_inicio, proximo_cobro, estado_pago, notas, activo, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        cliente,
+        empresaId,
+        dto?.recurso_id ? Number(dto.recurso_id) || null : null,
+        dto?.descripcion ? String(dto.descripcion).trim() || null : null,
+        Number(dto?.precio) || 0,
+        String(dto?.moneda ?? 'PEN').trim() || 'PEN',
+        String(dto?.ciclo ?? 'mensual').trim() || 'mensual',
+        dto?.fecha_inicio ? String(dto.fecha_inicio).slice(0, 10) : null,
+        dto?.proximo_cobro ? String(dto.proximo_cobro).slice(0, 10) : null,
+        String(dto?.estado_pago ?? 'pendiente').trim() || 'pendiente',
+        dto?.notas ? String(dto.notas) : null,
+        dto?.activo === false || dto?.activo === 0 ? 0 : 1,
+        uid ?? null,
+      ],
+    );
+    const list = await this.listInfraAlquileres();
+    return list.find((r) => r.id === res.insertId) ?? null;
+  },
+
+  async updateInfraAlquiler(id: number, dto: Record<string, unknown>, uid?: number) {
+    await ensureInfra();
+    const fields: string[] = [];
+    const vals: any[] = [];
+    if (dto.cliente !== undefined)       { fields.push('cliente = ?');       vals.push(dto.cliente ? String(dto.cliente).trim() || null : null); }
+    if (dto.empresa_id !== undefined)    { fields.push('empresa_id = ?');    vals.push(dto.empresa_id ? Number(dto.empresa_id) || null : null); }
+    if (dto.recurso_id !== undefined)    { fields.push('recurso_id = ?');    vals.push(dto.recurso_id ? Number(dto.recurso_id) || null : null); }
+    if (dto.descripcion !== undefined)   { fields.push('descripcion = ?');   vals.push(dto.descripcion ? String(dto.descripcion).trim() || null : null); }
+    if (dto.precio !== undefined)        { fields.push('precio = ?');        vals.push(Number(dto.precio) || 0); }
+    if (dto.moneda !== undefined)        { fields.push('moneda = ?');        vals.push(String(dto.moneda).trim() || 'PEN'); }
+    if (dto.ciclo !== undefined)         { fields.push('ciclo = ?');         vals.push(String(dto.ciclo).trim() || 'mensual'); }
+    if (dto.fecha_inicio !== undefined)  { fields.push('fecha_inicio = ?');  vals.push(dto.fecha_inicio ? String(dto.fecha_inicio).slice(0, 10) : null); }
+    if (dto.proximo_cobro !== undefined) { fields.push('proximo_cobro = ?'); vals.push(dto.proximo_cobro ? String(dto.proximo_cobro).slice(0, 10) : null); }
+    if (dto.estado_pago !== undefined)   { fields.push('estado_pago = ?');   vals.push(String(dto.estado_pago).trim() || 'pendiente'); }
+    if (dto.notas !== undefined)         { fields.push('notas = ?');         vals.push(dto.notas ? String(dto.notas) : null); }
+    if (dto.activo !== undefined)        { fields.push('activo = ?');        vals.push(dto.activo === false || dto.activo === 0 ? 0 : 1); }
+    fields.push('user_actua_id = ?'); vals.push(uid ?? null);
+    vals.push(id);
+    const [res] = await pool().query<any>(`UPDATE infra_alquileres SET ${fields.join(', ')} WHERE id = ?`, vals);
+    if (!res.affectedRows) return null;
+    const list = await this.listInfraAlquileres();
+    return list.find((r) => r.id === id) ?? null;
+  },
+
+  async deleteInfraAlquiler(id: number) {
+    await ensureInfra();
+    const [res] = await pool().query<any>('DELETE FROM infra_alquileres WHERE id = ?', [id]);
+    return (res.affectedRows ?? 0) > 0;
+  },
+
+  /**
+   * Registra un cobro: guarda `ultimo_cobro = hoy` y CORRE el próximo cobro al
+   * siguiente ciclo (mensual +1 mes, anual +1 año). Pago único queda 'pagado' y sin
+   * próxima fecha; recurrentes vuelven a 'pendiente' con la nueva fecha (sale del semáforo).
+   */
+  async registrarCobroAlquiler(id: number, uid?: number) {
+    await ensureInfra();
+    const [res] = await pool().query<any>(
+      `UPDATE infra_alquileres SET
+         ultimo_cobro = CURDATE(),
+         proximo_cobro = CASE ciclo
+           WHEN 'anual'   THEN DATE_ADD(COALESCE(proximo_cobro, CURDATE()), INTERVAL 1 YEAR)
+           WHEN 'mensual' THEN DATE_ADD(COALESCE(proximo_cobro, CURDATE()), INTERVAL 1 MONTH)
+           ELSE NULL END,
+         estado_pago = CASE ciclo WHEN 'unico' THEN 'pagado' ELSE 'pendiente' END,
+         user_actua_id = ?
+       WHERE id = ?`,
+      [uid ?? null, id],
+    );
+    if (!res.affectedRows) return null;
+    const list = await this.listInfraAlquileres();
+    return list.find((r) => r.id === id) ?? null;
+  },
+
+  /**
+   * Alertas de cobro: alquileres activos, NO pagados, cuyo próximo cobro cae dentro
+   * de `dias` (por defecto 7) o ya venció. Ordenados del más urgente al menos.
+   */
+  async alertasCobro(dias = 7) {
+    await ensureInfra();
+    const [rows] = await pool().query<any[]>(
+      `SELECT al.id, al.empresa_id, al.precio, al.moneda, al.proximo_cobro, al.estado_pago,
+              COALESCE(e.razon_social, al.cliente) AS cliente,
+              COALESCE(al.descripcion, r.nombre) AS descripcion,
+              DATEDIFF(al.proximo_cobro, CURDATE()) AS dias
+         FROM infra_alquileres al
+         LEFT JOIN empresas e ON e.id = al.empresa_id
+         LEFT JOIN infra_recursos r ON r.id = al.recurso_id
+        WHERE al.activo = 1
+          AND al.estado_pago <> 'pagado'
+          AND al.proximo_cobro IS NOT NULL
+          AND al.proximo_cobro <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
+        ORDER BY al.proximo_cobro`,
+      [dias],
+    );
+    return rows;
+  },
+
+  async getMeta(clave: string): Promise<string | null> {
+    await ensureInfra();
+    const [rows] = await pool().query<any[]>('SELECT valor FROM infra_meta WHERE clave = ?', [clave]);
+    return rows[0]?.valor ?? null;
+  },
+
+  async setMeta(clave: string, valor: string): Promise<void> {
+    await ensureInfra();
+    await pool().query(
+      'INSERT INTO infra_meta (clave, valor) VALUES (?, ?) ON DUPLICATE KEY UPDATE valor = VALUES(valor)',
+      [clave, valor],
+    );
+  },
+
+  /**
+   * Envía UN correo-resumen de cobros pendientes a info@vaxa.com.pe, como máximo una
+   * vez por día (se controla con infra_meta). Lo llama el scheduler diario.
+   * `force` ignora el candado del día (para el botón "enviar ahora").
+   */
+  async procesarAvisosCobro(force = false): Promise<{ enviado: boolean; motivo?: string; cantidad?: number }> {
+    const hoy = hoyYmd();
+    if (!force) {
+      const ultimo = await this.getMeta('cobro_aviso_ultimo');
+      if (ultimo === hoy) return { enviado: false, motivo: 'ya se envió hoy' };
+    }
+    const items = await this.alertasCobro(7);
+    if (items.length === 0) {
+      await this.setMeta('cobro_aviso_ultimo', hoy);
+      return { enviado: false, motivo: 'sin cobros pendientes', cantidad: 0 };
+    }
+
+    const money = (n: number, m: string) => `${m === 'USD' ? '$' : 'S/'} ${(Number(n) || 0).toFixed(2)}`;
+    const etiqueta = (d: number) => d < 0 ? `venció hace ${Math.abs(d)} día(s)` : d === 0 ? 'vence HOY' : `vence en ${d} día(s)`;
+    const filasTxt = items.map((i) => `• ${i.cliente} — ${i.descripcion || 'Servicio'} — ${money(i.precio, i.moneda)} — ${etiqueta(Number(i.dias))} (${String(i.proximo_cobro).slice(0, 10)})`).join('\n');
+    const filasHtml = items.map((i) => {
+      const d = Number(i.dias);
+      const col = d < 0 ? '#DC2626' : d === 0 ? '#D97706' : '#059669';
+      return `<tr>
+        <td style="padding:8px 10px;border-bottom:1px solid #eee;font-weight:600;color:#0D0E12">${i.cliente}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #eee;color:#555">${i.descripcion || 'Servicio'}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #eee;color:#0D0E12">${money(i.precio, i.moneda)}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #eee;color:${col};font-weight:600">${etiqueta(d)}</td>
+        <td style="padding:8px 10px;border-bottom:1px solid #eee;color:#888">${String(i.proximo_cobro).slice(0, 10)}</td>
+      </tr>`;
+    }).join('');
+
+    await enviarCorreo({
+      to: CONTACTO_TO, // info@vaxa.com.pe
+      subject: `💰 Cobros pendientes (${items.length}) — Vaxa Infraestructura`,
+      text: `Tienes ${items.length} cobro(s) por gestionar:\n\n${filasTxt}\n\n— Vaxa`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto">
+          <h2 style="color:#0D0E12">Cobros pendientes (${items.length})</h2>
+          <p style="color:#555">Estos clientes tienen un cobro por vencer o vencido:</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px">
+            <thead><tr style="text-align:left;color:#888;font-size:12px;text-transform:uppercase">
+              <th style="padding:8px 10px">Cliente</th><th style="padding:8px 10px">Servicio</th>
+              <th style="padding:8px 10px">Monto</th><th style="padding:8px 10px">Estado</th><th style="padding:8px 10px">Fecha</th>
+            </tr></thead>
+            <tbody>${filasHtml}</tbody>
+          </table>
+          <p style="color:#999;font-size:12px;margin-top:18px">Aviso automático de Vaxa · módulo Infraestructura</p>
+        </div>`,
+    });
+
+    await this.setMeta('cobro_aviso_ultimo', hoy);
+    return { enviado: true, cantidad: items.length };
   },
 
   /** Roles disponibles (para el selector al crear usuario). */

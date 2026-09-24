@@ -138,6 +138,18 @@ app.get(`${BASE_PATH}/public/vaxa-landing`, publicLimiter, async (_req, res) => 
   catch { res.json({}); }
 });
 
+/** Alianzas de la landing de Vaxa — lectura pública (se editan desde sistemas-vaxa). */
+app.get(`${BASE_PATH}/public/vaxa-alianzas`, publicLimiter, async (_req, res) => {
+  try { res.json(await adminRepo.listVaxaAlianzas(true)); }
+  catch { res.json([]); }
+});
+
+/** Testimonios de la landing de Vaxa — lectura pública (se editan desde sistemas-vaxa). */
+app.get(`${BASE_PATH}/public/vaxa-testimonios`, publicLimiter, async (_req, res) => {
+  try { res.json(await adminRepo.listVaxaTestimonios(true)); }
+  catch { res.json([]); }
+});
+
 /** Formulario de contacto de las landings (marca personal). Envía correo a Vaxa.
  *  Límite ESTRICTO: es un envío de correo, hay que frenar el spam por IP. */
 const contactoLimiter = rateLimit({
@@ -205,3 +217,15 @@ server.listen(PORT, () => {
   console.log(`  Certs:   ${BASE_PATH}/api/certificados (requiere x-tenant-id + JWT)`);
   console.log(`  Público: GET ${BASE_PATH}/public/certificado/:tenantSlug/:codigo`);
 });
+
+/**
+ * Aviso diario de cobros de Infraestructura → correo a info@vaxa.com.pe.
+ * Revisa cada hora; a partir de las 8:00 (hora del servidor) envía el resumen del
+ * día una sola vez (el candado por día vive en infra_meta, sobrevive a reinicios).
+ */
+setInterval(() => {
+  if (new Date().getHours() < 8) return;
+  adminRepo.procesarAvisosCobro()
+    .then((r) => { if (r.enviado) console.log(`[infra] correo de cobros enviado (${r.cantidad}) a info@vaxa.com.pe`); })
+    .catch((e) => console.error('[infra] fallo al procesar avisos de cobro:', e?.message ?? e));
+}, 60 * 60 * 1000); // cada hora
