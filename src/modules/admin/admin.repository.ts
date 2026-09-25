@@ -226,9 +226,31 @@ async function ensureInfra(): Promise<void> {
        valor VARCHAR(255) NULL
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
+  // Historial de cobros: cada vez que se registra un cobro se guarda una fila (no se borra).
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS infra_cobros (
+       id             INT AUTO_INCREMENT PRIMARY KEY,
+       alquiler_id    INT           NOT NULL,
+       empresa_id     INT           NULL,
+       cliente        VARCHAR(200)  NULL,
+       descripcion    VARCHAR(250)  NULL,
+       monto          DECIMAL(10,2) NOT NULL DEFAULT 0,
+       moneda         VARCHAR(8)    NOT NULL DEFAULT 'PEN',
+       ciclo          VARCHAR(20)   NULL,
+       fecha_cobro    DATE          NOT NULL,
+       cubierto_hasta DATE          NULL,
+       user_id        INT           NULL,
+       created_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       INDEX idx_infra_cobros_alquiler (alquiler_id)
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
   // Migración suave: agrega columnas nuevas a tablas ya creadas (ignora "columna duplicada").
   await addColIfMissing('infra_recursos', 'proyectos', 'TEXT NULL AFTER fecha_renovacion');
   await addColIfMissing('infra_alquileres', 'ultimo_cobro', 'DATE NULL AFTER proximo_cobro');
+  await addColIfMissing('infra_alquileres', 'email', "VARCHAR(160) NULL AFTER cliente");
+  // Marca el proximo_cobro para el que YA se envió el aviso (así no se repite).
+  // Al registrar un cobro, proximo_cobro avanza y el aviso se rearma para el nuevo ciclo.
+  await addColIfMissing('infra_alquileres', 'aviso_enviado_para', 'DATE NULL AFTER ultimo_cobro');
   _ensuredInfra = true;
 }
 
@@ -919,7 +941,7 @@ export const adminRepo = {
     await ensureInfra();
     await ensureVaxaAlianzas(); // no-op de seguridad; empresas viene de su propia tabla
     const [rows] = await pool().query<any[]>(
-      `SELECT al.id, al.cliente, al.empresa_id, al.recurso_id, al.descripcion,
+      `SELECT al.id, al.cliente, al.email, al.empresa_id, al.recurso_id, al.descripcion,
               al.precio, al.moneda, al.ciclo, al.fecha_inicio, al.proximo_cobro, al.ultimo_cobro,
               al.estado_pago, al.notas, al.activo, al.user_crea_id, al.user_actua_id,
               al.created_at, al.updated_at,
@@ -940,10 +962,11 @@ export const adminRepo = {
     const empresaId = dto?.empresa_id ? Number(dto.empresa_id) || null : null;
     if (!cliente && !empresaId) throw new Error('Indica el cliente (empresa o nombre)');
     const [res] = await pool().query<any>(
-      `INSERT INTO infra_alquileres (cliente, empresa_id, recurso_id, descripcion, precio, moneda, ciclo, fecha_inicio, proximo_cobro, estado_pago, notas, activo, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO infra_alquileres (cliente, email, empresa_id, recurso_id, descripcion, precio, moneda, ciclo, fecha_inicio, proximo_cobro, estado_pago, notas, activo, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         cliente,
+        dto?.email ? String(dto.email).trim() || null : null,
         empresaId,
         dto?.recurso_id ? Number(dto.recurso_id) || null : null,
         dto?.descripcion ? String(dto.descripcion).trim() || null : null,
@@ -967,6 +990,7 @@ export const adminRepo = {
     const fields: string[] = [];
     const vals: any[] = [];
     if (dto.cliente !== undefined)       { fields.push('cliente = ?');       vals.push(dto.cliente ? String(dto.cliente).trim() || null : null); }
+    if (dto.email !== undefined)         { fields.push('email = ?');         vals.push(dto.email ? String(dto.email).trim() || null : null); }
     if (dto.empresa_id !== undefined)    { fields.push('empresa_id = ?');    vals.push(dto.empresa_id ? Number(dto.empresa_id) || null : null); }
     if (dto.recurso_id !== undefined)    { fields.push('recurso_id = ?');    vals.push(dto.recurso_id ? Number(dto.recurso_id) || null : null); }
     if (dto.descripcion !== undefined)   { fields.push('descripcion = ?');   vals.push(dto.descripcion ? String(dto.descripcion).trim() || null : null); }
@@ -1003,8 +1027,10 @@ export const adminRepo = {
       `UPDATE infra_alquileres SET
          ultimo_cobro = CURDATE(),
          proximo_cobro = CASE ciclo
-           WHEN 'anual'   THEN DATE_ADD(COALESCE(proximo_cobro, CURDATE()), INTERVAL 1 YEAR)
-           WHEN 'mensual' THEN DATE_ADD(COALESCE(proximo_cobro, CURDATE()), INTERVAL 1 MONTH)
+           WHEN 'anual'      THEN DATE_ADD(COALESCE(proximo_cobro, CURDATE()), INTERVAL 1 YEAR)
+           WHEN 'semestral'  THEN DATE_ADD(COALESCE(proximo_cobro, CURDATE()), INTERVAL 6 MONTH)
+           WHEN 'trimestral' THEN DATE_ADD(COALESCE(proximo_cobro, CURDATE()), INTERVAL 3 MONTH)
+           WHEN 'mensual'    THEN DATE_ADD(COALESCE(proximo_cobro, CURDATE()), INTERVAL 1 MONTH)
            ELSE NULL END,
          estado_pago = CASE ciclo WHEN 'unico' THEN 'pagado' ELSE 'pendiente' END,
          user_actua_id = ?
@@ -1012,18 +1038,99 @@ export const adminRepo = {
       [uid ?? null, id],
     );
     if (!res.affectedRows) return null;
+    // Deja constancia del cobro en el historial (no se borra nunca). Se hace con un
+    // SELECT desde la propia tabla para que MySQL entregue las fechas ya formateadas
+    // (evita el round-trip por JS que rompía 'cubierto_hasta').
+    await pool().query(
+      `INSERT INTO infra_cobros (alquiler_id, empresa_id, cliente, descripcion, monto, moneda, ciclo, fecha_cobro, cubierto_hasta, user_id)
+       SELECT al.id, al.empresa_id,
+              COALESCE(e.razon_social, al.cliente),
+              COALESCE(al.descripcion, r.nombre),
+              al.precio, al.moneda, al.ciclo, CURDATE(), al.proximo_cobro, ?
+         FROM infra_alquileres al
+         LEFT JOIN empresas e ON e.id = al.empresa_id
+         LEFT JOIN infra_recursos r ON r.id = al.recurso_id
+        WHERE al.id = ?`,
+      [uid ?? null, id],
+    );
     const list = await this.listInfraAlquileres();
     return list.find((r) => r.id === id) ?? null;
   },
 
-  /**
-   * Alertas de cobro: alquileres activos, NO pagados, cuyo próximo cobro cae dentro
-   * de `dias` (por defecto 7) o ya venció. Ordenados del más urgente al menos.
-   */
-  async alertasCobro(dias = 7) {
+  /** Historial de cobros. Si se pasa `alquilerId`, filtra por ese alquiler. */
+  async listInfraCobros(alquilerId?: number) {
     await ensureInfra();
+    const where = alquilerId ? 'WHERE alquiler_id = ?' : '';
     const [rows] = await pool().query<any[]>(
-      `SELECT al.id, al.empresa_id, al.precio, al.moneda, al.proximo_cobro, al.estado_pago,
+      `SELECT id, alquiler_id, empresa_id, cliente, descripcion, monto, moneda, ciclo,
+              fecha_cobro, cubierto_hasta, user_id, created_at
+         FROM infra_cobros ${where}
+        ORDER BY fecha_cobro DESC, id DESC`,
+      alquilerId ? [alquilerId] : [],
+    );
+    return rows;
+  },
+
+  /**
+   * Manda al CLIENTE (no a Vaxa) un recordatorio del cobro pendiente por correo.
+   * Usa el `email` del alquiler; si no hay, no envía. Devuelve {enviado, motivo?}.
+   */
+  async enviarRecordatorioCliente(id: number): Promise<{ enviado: boolean; motivo?: string }> {
+    await ensureInfra();
+    const list = await this.listInfraAlquileres();
+    const al = list.find((r) => r.id === id);
+    if (!al) return { enviado: false, motivo: 'alquiler no encontrado' };
+    const to = String(al.email ?? '').trim();
+    if (!to) return { enviado: false, motivo: 'este alquiler no tiene correo del cliente' };
+
+    const money = (n: number, m: string) => `${m === 'USD' ? '$' : 'S/'} ${(Number(n) || 0).toFixed(2)}`;
+    const nombre = al.empresa_nombre || al.cliente || 'Estimado cliente';
+    const servicio = al.descripcion || al.recurso_nombre || 'Servicio de infraestructura';
+    const fecha = al.proximo_cobro ? String(al.proximo_cobro).slice(0, 10) : 'la fecha acordada';
+    const monto = money(al.precio, al.moneda);
+
+    await enviarCorreo({
+      to,
+      replyTo: CONTACTO_TO, // si el cliente responde, la respuesta llega a info@vaxa.com.pe
+      subject: `Recordatorio de pago — ${servicio}`,
+      text: `Hola ${nombre},\n\nTe recordamos el pago de "${servicio}" por ${monto}, con vencimiento el ${fecha}.\n\nGracias,\nVaxa`,
+      html: `
+        <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto">
+          <h2 style="color:#0D0E12">Recordatorio de pago</h2>
+          <p style="color:#555">Hola <strong>${nombre}</strong>,</p>
+          <p style="color:#555">Te recordamos el pago del siguiente servicio:</p>
+          <table style="width:100%;border-collapse:collapse;font-size:14px;margin:12px 0">
+            <tr><td style="padding:8px 10px;border-bottom:1px solid #eee;color:#888">Servicio</td><td style="padding:8px 10px;border-bottom:1px solid #eee;color:#0D0E12;font-weight:600">${servicio}</td></tr>
+            <tr><td style="padding:8px 10px;border-bottom:1px solid #eee;color:#888">Monto</td><td style="padding:8px 10px;border-bottom:1px solid #eee;color:#0D0E12;font-weight:600">${monto}</td></tr>
+            <tr><td style="padding:8px 10px;border-bottom:1px solid #eee;color:#888">Vencimiento</td><td style="padding:8px 10px;border-bottom:1px solid #eee;color:#0D0E12;font-weight:600">${fecha}</td></tr>
+          </table>
+          <p style="color:#999;font-size:12px;margin-top:18px">Enviado por Vaxa</p>
+        </div>`,
+    });
+    return { enviado: true };
+  },
+
+  /**
+   * Alertas de cobro: alquileres activos, NO pagados, cuyo próximo cobro entró en su
+   * VENTANA de aviso según el ciclo (anual=15d, semestral=30d, mensual=7d, trimestral=15d)
+   * o ya venció. Ordenados del más urgente al menos.
+   * `soloNoAvisados`=true devuelve solo los que aún NO tienen el correo enviado para ese
+   * vencimiento (se usa para disparar el correo una sola vez).
+   */
+  async alertasCobro(soloNoAvisados = false) {
+    await ensureInfra();
+    // Días de anticipación por ciclo (la "ventana" de aviso).
+    const ventanaSql = `CASE al.ciclo
+        WHEN 'anual'      THEN 15
+        WHEN 'semestral'  THEN 30
+        WHEN 'trimestral' THEN 15
+        WHEN 'mensual'    THEN 7
+        ELSE 7 END`;
+    const condNoAvisado = soloNoAvisados
+      ? 'AND (al.aviso_enviado_para IS NULL OR al.aviso_enviado_para <> al.proximo_cobro)'
+      : '';
+    const [rows] = await pool().query<any[]>(
+      `SELECT al.id, al.empresa_id, al.email, al.ciclo, al.precio, al.moneda, al.proximo_cobro, al.estado_pago,
               COALESCE(e.razon_social, al.cliente) AS cliente,
               COALESCE(al.descripcion, r.nombre) AS descripcion,
               DATEDIFF(al.proximo_cobro, CURDATE()) AS dias
@@ -1033,9 +1140,9 @@ export const adminRepo = {
         WHERE al.activo = 1
           AND al.estado_pago <> 'pagado'
           AND al.proximo_cobro IS NOT NULL
-          AND al.proximo_cobro <= DATE_ADD(CURDATE(), INTERVAL ? DAY)
+          AND al.proximo_cobro <= DATE_ADD(CURDATE(), INTERVAL (${ventanaSql}) DAY)
+          ${condNoAvisado}
         ORDER BY al.proximo_cobro`,
-      [dias],
     );
     return rows;
   },
@@ -1055,20 +1162,18 @@ export const adminRepo = {
   },
 
   /**
-   * Envía UN correo-resumen de cobros pendientes a info@vaxa.com.pe, como máximo una
-   * vez por día (se controla con infra_meta). Lo llama el scheduler diario.
-   * `force` ignora el candado del día (para el botón "enviar ahora").
+   * Envía a info@vaxa.com.pe UN correo-resumen con los cobros que ENTRARON en su ventana
+   * de aviso (por ciclo) y que aún no fueron avisados. Cada cobro se avisa UNA sola vez por
+   * vencimiento (se marca `aviso_enviado_para`). Lo llama el scheduler (cada hora desde 8:00).
+   * `force`=true (botón "enviar ahora") reenvía todos los que estén en ventana.
    */
   async procesarAvisosCobro(force = false): Promise<{ enviado: boolean; motivo?: string; cantidad?: number }> {
-    const hoy = hoyYmd();
-    if (!force) {
-      const ultimo = await this.getMeta('cobro_aviso_ultimo');
-      if (ultimo === hoy) return { enviado: false, motivo: 'ya se envió hoy' };
-    }
-    const items = await this.alertasCobro(7);
+    // Normal (scheduler): SOLO los que aún no tienen aviso enviado para ese vencimiento
+    // → el correo se dispara UNA sola vez cuando el cobro entra en su ventana por ciclo.
+    // Force (botón "enviar ahora"): reenvía todos los que estén en ventana.
+    const items = await this.alertasCobro(!force);
     if (items.length === 0) {
-      await this.setMeta('cobro_aviso_ultimo', hoy);
-      return { enviado: false, motivo: 'sin cobros pendientes', cantidad: 0 };
+      return { enviado: false, motivo: force ? 'sin cobros en ventana' : 'sin cobros nuevos por avisar', cantidad: 0 };
     }
 
     const money = (n: number, m: string) => `${m === 'USD' ? '$' : 'S/'} ${(Number(n) || 0).toFixed(2)}`;
@@ -1105,7 +1210,15 @@ export const adminRepo = {
         </div>`,
     });
 
-    await this.setMeta('cobro_aviso_ultimo', hoy);
+    // Marca cada cobro como "ya avisado" para ESTE vencimiento → no se repite el correo.
+    // Cuando se registre el cobro, proximo_cobro avanza y el aviso se rearma solo.
+    const ids = items.map((i) => i.id);
+    if (ids.length) {
+      await pool().query(
+        `UPDATE infra_alquileres SET aviso_enviado_para = proximo_cobro WHERE id IN (${ids.map(() => '?').join(',')})`,
+        ids,
+      );
+    }
     return { enviado: true, cantidad: items.length };
   },
 

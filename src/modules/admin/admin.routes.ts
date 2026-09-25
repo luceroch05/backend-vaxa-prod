@@ -5,6 +5,7 @@ import { planRepo } from '../certificados/planes/plan.repository';
 import { comprobanteRepo } from '../facturacion/comprobante.repository';
 import { consultarRuc } from '../facturacion/consulta-ruc.service';
 import { generarPdf } from '../facturacion/pdf.service';
+import { soloAdmin } from '../certificados/shared/rol.guard';
 import { sendError } from '../../shared/errors';
 
 const w = (fn: (req: Request, res: Response) => Promise<unknown>) =>
@@ -238,54 +239,64 @@ router.delete('/vaxa-testimonios/:id', w(async (req, res) => {
   res.status(204).send();
 }));
 
-/** Infraestructura (interno Vaxa): recursos propios (VPS/dominios/hosting). */
-router.get('/infra-recursos', w(async (_req, res) => {
+/** Infraestructura (interno Vaxa): recursos propios (VPS/dominios/hosting). Solo ADMINISTRADOR. */
+router.get('/infra-recursos', soloAdmin, w(async (_req, res) => {
   res.json(await adminRepo.listInfraRecursos());
 }));
-router.post('/infra-recursos', w(async (req, res) => {
+router.post('/infra-recursos', soloAdmin, w(async (req, res) => {
   res.status(201).json(await adminRepo.createInfraRecurso(req.body ?? {}, uid(req)));
 }));
-router.patch('/infra-recursos/:id', w(async (req, res) => {
+router.patch('/infra-recursos/:id', soloAdmin, w(async (req, res) => {
   const r = await adminRepo.updateInfraRecurso(Number(req.params.id), req.body ?? {}, uid(req));
   if (!r) { res.status(404).json({ error: 'Recurso no encontrado' }); return; }
   res.json(r);
 }));
-router.delete('/infra-recursos/:id', w(async (req, res) => {
+router.delete('/infra-recursos/:id', soloAdmin, w(async (req, res) => {
   const ok = await adminRepo.deleteInfraRecurso(Number(req.params.id));
   if (!ok) { res.status(404).json({ error: 'Recurso no encontrado' }); return; }
   res.status(204).send();
 }));
 
-/** Infraestructura: alquileres/servicios que le cobras a un cliente. */
-router.get('/infra-alquileres', w(async (_req, res) => {
+/** Infraestructura: alquileres/servicios que le cobras a un cliente. Solo ADMINISTRADOR. */
+router.get('/infra-alquileres', soloAdmin, w(async (_req, res) => {
   res.json(await adminRepo.listInfraAlquileres());
 }));
-router.post('/infra-alquileres', w(async (req, res) => {
+router.post('/infra-alquileres', soloAdmin, w(async (req, res) => {
   res.status(201).json(await adminRepo.createInfraAlquiler(req.body ?? {}, uid(req)));
 }));
-router.patch('/infra-alquileres/:id', w(async (req, res) => {
+router.patch('/infra-alquileres/:id', soloAdmin, w(async (req, res) => {
   const a = await adminRepo.updateInfraAlquiler(Number(req.params.id), req.body ?? {}, uid(req));
   if (!a) { res.status(404).json({ error: 'Alquiler no encontrado' }); return; }
   res.json(a);
 }));
-router.delete('/infra-alquileres/:id', w(async (req, res) => {
+router.delete('/infra-alquileres/:id', soloAdmin, w(async (req, res) => {
   const ok = await adminRepo.deleteInfraAlquiler(Number(req.params.id));
   if (!ok) { res.status(404).json({ error: 'Alquiler no encontrado' }); return; }
   res.status(204).send();
 }));
 /** Registra el cobro de un alquiler y corre el próximo cobro al siguiente ciclo. */
-router.post('/infra-alquileres/:id/cobrar', w(async (req, res) => {
+router.post('/infra-alquileres/:id/cobrar', soloAdmin, w(async (req, res) => {
   const a = await adminRepo.registrarCobroAlquiler(Number(req.params.id), uid(req));
   if (!a) { res.status(404).json({ error: 'Alquiler no encontrado' }); return; }
   res.json(a);
 }));
+/** Envía al CLIENTE un recordatorio de pago por correo (usa el email del alquiler). */
+router.post('/infra-alquileres/:id/recordar', soloAdmin, w(async (req, res) => {
+  res.json(await adminRepo.enviarRecordatorioCliente(Number(req.params.id)));
+}));
+
+/** Historial de cobros. Query opcional ?alquiler_id= para filtrar por un alquiler. */
+router.get('/infra-cobros', soloAdmin, w(async (req, res) => {
+  const aid = req.query.alquiler_id ? Number(req.query.alquiler_id) : undefined;
+  res.json(await adminRepo.listInfraCobros(aid));
+}));
 
 /** Infraestructura: alertas de cobro (para la campana de notificaciones). */
-router.get('/infra-alertas', w(async (_req, res) => {
-  res.json(await adminRepo.alertasCobro(7));
+router.get('/infra-alertas', soloAdmin, w(async (_req, res) => {
+  res.json(await adminRepo.alertasCobro()); // ventana por ciclo; muestra todos (avisados o no)
 }));
 /** Infraestructura: envía YA el correo-resumen de cobros a info@vaxa.com.pe. */
-router.post('/infra-avisos/enviar', w(async (_req, res) => {
+router.post('/infra-avisos/enviar', soloAdmin, w(async (_req, res) => {
   res.json(await adminRepo.procesarAvisosCobro(true));
 }));
 
