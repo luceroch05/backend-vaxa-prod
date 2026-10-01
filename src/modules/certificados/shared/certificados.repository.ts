@@ -2269,6 +2269,10 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
   // y de paso el nombre corto = primer nombre + apellidos (variable {nombreCorto}).
   let grupoId = 0;
   let nombreCorto: string = cert.participante_nombre;
+  // Nombre completo SIN grados. cert.participante_nombre ya viene con los grados
+  // prepuestos desde el SQL; para no duplicarlos al anteponer prefijoGrados según
+  // la calidad, reconstruimos la base limpia (nombres + apellidos) igual que nombreCorto.
+  let nombreCompleto: string = cert.participante_nombre;
   let calidad = 'Participante';
   let prefijoGrados = '';   // "Mag. Lic. " si la persona tiene grados; se antepone al nombre
   // Documento del participante (variables {documento} y {tipoDocumento}).
@@ -2278,7 +2282,8 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       const [insRows] = await pool().query<any[]>(
         `SELECT i.grupo_id, i.calidad, p.grados, p.numero_documento,
                 td.codigo AS tipo_doc_codigo,
-                SUBSTRING_INDEX(p.nombres, ' ', 1) AS primer_nombre, p.apellidos
+                p.nombres, p.apellidos,
+                SUBSTRING_INDEX(p.nombres, ' ', 1) AS primer_nombre
            FROM inscripciones i
            JOIN participantes p ON p.id = i.participante_id
            LEFT JOIN tipos_documento td ON td.id = p.tipo_documento_id
@@ -2288,13 +2293,13 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
       const r = (insRows as any[])[0];
       grupoId = r?.grupo_id ?? 0;
       if (r?.primer_nombre && r?.apellidos) nombreCorto = `${r.primer_nombre} ${r.apellidos}`.trim();
+      if (r?.nombres && r?.apellidos) nombreCompleto = `${r.nombres} ${r.apellidos}`.trim();
       if (r?.calidad) calidad = String(r.calidad);
       if (r?.numero_documento) documento = String(r.numero_documento).trim();
       if (r?.tipo_doc_codigo)  tipoDoc = String(r.tipo_doc_codigo).trim();
-      // Los grados (Lic., Mag., …) solo se anteponen a NO participantes (ponentes,
-      // organizadores…). A un Participante normal el nombre va tal cual.
-      const esParticipante = (calidad || 'Participante').trim().toLowerCase() === 'participante';
-      prefijoGrados = esParticipante ? '' : gradosPrefijo(r?.grados);
+      // Los grados (Lic., Mag., T.M., …) se anteponen al nombre de quien los tenga,
+      // sin importar la calidad (participante, ponente, organizador…).
+      prefijoGrados = gradosPrefijo(r?.grados);
     }
 
     // Buscar config: primero la del grupo, fallback a la del programa
@@ -2427,7 +2432,7 @@ if (!acta && cert.programa_id) {
     }
 
     return {
-      participante_nombre:      prefijoGrados + cert.participante_nombre,
+      participante_nombre:      prefijoGrados + nombreCompleto,
       participante_nombre_corto: prefijoGrados + nombreCorto,
       participante_calidad:      calidad,
       participante_documento:   documento,

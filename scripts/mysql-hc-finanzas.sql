@@ -127,5 +127,47 @@ CREATE TABLE IF NOT EXISTS hc_caja_mov (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   COMMENT='Movimientos de caja: ingresos y egresos del centro';
 
+-- 6b) Descuentos en ventas (recibo SIN IGV): monto S/ global y por línea ---------
+--     Idempotente: agrega la columna solo si no existe.
+SET @has_vdesc := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'hc_ventas' AND COLUMN_NAME = 'descuento');
+SET @sql := IF(@has_vdesc = 0,
+  'ALTER TABLE hc_ventas ADD COLUMN descuento DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER total',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @has_idesc := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'hc_venta_items' AND COLUMN_NAME = 'descuento');
+SET @sql := IF(@has_idesc = 0,
+  'ALTER TABLE hc_venta_items ADD COLUMN descuento DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER precio_unit',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- 6c) Pago dividido: una venta saldada con varios métodos (efectivo + yape…) -----
+CREATE TABLE IF NOT EXISTS hc_venta_pagos (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  empresa_id  INT           NOT NULL,
+  venta_id    INT           NOT NULL,
+  metodo_pago VARCHAR(30)   NOT NULL,
+  monto       DECIMAL(10,2) NOT NULL,
+  created_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_hcvp_empresa FOREIGN KEY (empresa_id) REFERENCES empresas(id)  ON DELETE CASCADE,
+  CONSTRAINT fk_hcvp_venta   FOREIGN KEY (venta_id)   REFERENCES hc_ventas(id) ON DELETE CASCADE,
+  INDEX idx_hcvp_venta (venta_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='Pagos de una venta por método (pago dividido)';
+
+-- 7) Módulos activos por centro (Vaxa los prende/apaga desde sistemas-vaxa) -----
+--    Sin fila para un módulo => se asume ACTIVO (default). Así los centros
+--    existentes no pierden nada; Vaxa apaga solo lo que el cliente no contrató.
+CREATE TABLE IF NOT EXISTS hc_modulos (
+  empresa_id INT         NOT NULL,
+  modulo     VARCHAR(20) NOT NULL,            -- pacientes|agenda|servicios|ventas|inventario|caja
+  activo     TINYINT(1)  NOT NULL DEFAULT 1,
+  PRIMARY KEY (empresa_id, modulo),
+  CONSTRAINT fk_hcmod_empresa FOREIGN KEY (empresa_id) REFERENCES empresas(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  COMMENT='Módulos del panel de Historias Clínicas activos por centro';
+
 -- Verificación
 SELECT 'hc_finanzas OK' AS estado;

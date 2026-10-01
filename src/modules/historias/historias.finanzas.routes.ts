@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import { finanzasRepo } from './historias.finanzas.repository';
+import { finanzasRepo, type HcModulo } from './historias.finanzas.repository';
 import { sendError } from '../../shared/errors';
 
 /**
@@ -27,8 +27,29 @@ const gestionaFinanzas = (req: Request, res: Response, next: NextFunction): void
   res.status(403).json({ error: 'Tu rol no tiene permiso para el módulo de caja.', code: 'ROL_SIN_PERMISO' });
 };
 
+/** Acciones destructivas de finanzas (anular venta, borrar caja): SOLO ADMINISTRADOR.
+ *  ADMISION puede registrar ventas y movimientos, pero no eliminarlos. */
+const soloAdmin = (req: Request, res: Response, next: NextFunction): void => {
+  if (rol(req) === 'ADMINISTRADOR') { next(); return; }
+  res.status(403).json({ error: 'Solo un administrador puede eliminar o anular. Pídeselo a un administrador.', code: 'ROL_SIN_PERMISO' });
+};
+
+/** Bloquea el grupo de rutas si Vaxa apagó ese módulo para el centro (403). */
+const requireModulo = (modulo: HcModulo) =>
+  (req: Request, res: Response, next: NextFunction): void => {
+    finanzasRepo.getModulos(tid(req))
+      .then((m) => {
+        if (m[modulo]) { next(); return; }
+        res.status(403).json({ error: `El módulo «${modulo}» no está activo para este centro.`, code: 'MODULO_INACTIVO' });
+      })
+      .catch((e) => sendError(res, e, 'historias-finanzas'));
+  };
+
 const router = Router();
 router.use(gestionaFinanzas);
+router.use('/productos', requireModulo('inventario'));
+router.use('/ventas',    requireModulo('ventas'));
+router.use('/caja',      requireModulo('caja'));
 
 // ── Inventario / Productos ─────────────────────────────────────────────────────
 router.get('/productos', w(async (req, res) => {
@@ -74,16 +95,17 @@ router.post('/ventas', w(async (req, res) => {
   res.status(201).json(await finanzasRepo.createVenta(tid(req), req.body ?? {}, uid(req)));
 }));
 
-router.post('/ventas/:id/anular', w(async (req, res) => {
+router.post('/ventas/:id/anular', soloAdmin, w(async (req, res) => {
   res.json(await finanzasRepo.anularVenta(tid(req), Number(req.params.id), uid(req)));
 }));
 
 // ── Caja: ingresos / egresos ─────────────────────────────────────────────────────
 router.get('/caja', w(async (req, res) => {
   res.json(await finanzasRepo.listCaja(tid(req), {
-    desde: (req.query.desde as string) || undefined,
-    hasta: (req.query.hasta as string) || undefined,
-    tipo:  (req.query.tipo as string) || undefined,
+    desde:  (req.query.desde as string) || undefined,
+    hasta:  (req.query.hasta as string) || undefined,
+    tipo:   (req.query.tipo as string) || undefined,
+    metodo: (req.query.metodo as string) || undefined,
   }));
 }));
 
@@ -91,7 +113,7 @@ router.post('/caja', w(async (req, res) => {
   res.status(201).json(await finanzasRepo.createCajaMov(tid(req), req.body ?? {}, uid(req)));
 }));
 
-router.delete('/caja/:id', w(async (req, res) => {
+router.delete('/caja/:id', soloAdmin, w(async (req, res) => {
   const ok = await finanzasRepo.deleteCajaMov(tid(req), Number(req.params.id));
   if (!ok) { res.status(404).json({ error: 'Movimiento no encontrado o no se puede eliminar (viene de una venta)' }); return; }
   res.status(204).send();

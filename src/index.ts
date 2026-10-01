@@ -25,6 +25,7 @@ import { backofficeRoutes } from './modules/backoffice/backoffice.routes';
 import { pacientesRoutes } from './modules/pacientes/pacientes.routes';
 import { historiasRoutes } from './modules/historias/historias.routes';
 import { historiasFinanzasRoutes } from './modules/historias/historias.finanzas.routes';
+import { historiasReportesRoutes } from './modules/historias/historias.reportes.routes';
 import { historiasPublicRoutes } from './modules/historias/historias.public.routes';
 import { webRoutes, webPublicRoutes } from './modules/web/web.routes';
 import { contactoPublicRoutes } from './modules/contacto/contacto.routes';
@@ -168,6 +169,9 @@ app.use(`${BASE_PATH}/api/historias`, jwtMiddleware, tenantMatchMiddleware, bloq
 
 /** Finanzas del centro (Caja + Ventas + Inventario): mismo stack; solo ADMIN/ADMISION. */
 app.use(`${BASE_PATH}/api/historias`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, historiasFinanzasRoutes);
+
+/** Reportes gerenciales del centro: mismo stack; solo lectura, ADMIN/ADMISION. */
+app.use(`${BASE_PATH}/api/historias`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, historiasReportesRoutes);
 
 /** Módulo "Mi Web" (contenido de la web pública editable): mismo stack que historias. */
 app.use(`${BASE_PATH}/api/web`, jwtMiddleware, tenantMatchMiddleware, bloqueoVencimientoMiddleware, webRoutes);

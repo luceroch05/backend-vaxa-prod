@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Request, Response } from 'express';
 import { adminRepo } from './admin.repository';
+import { finanzasRepo } from '../historias/historias.finanzas.repository';
 import { planRepo } from '../certificados/planes/plan.repository';
 import { comprobanteRepo } from '../facturacion/comprobante.repository';
 import { consultarRuc } from '../facturacion/consulta-ruc.service';
@@ -193,6 +194,31 @@ router.patch('/empresas/:id/usuarios/:usuarioId', w(async (req, res) => {
 router.delete('/empresas/:id/usuarios/:usuarioId', w(async (req, res) => {
   const producto = (req.query.producto as string | undefined)?.trim() || undefined;
   res.json(await adminRepo.eliminarUsuario(Number(req.params.id), Number(req.params.usuarioId), producto));
+}));
+
+/** Catálogo de sistemas disponibles (para elegir al registrar una empresa). */
+router.get('/productos', w(async (_req, res) => {
+  res.json(await adminRepo.listCatalogoProductos());
+}));
+
+/** Productos del centro (Certificados / Historias Clínicas): activar o desactivar. */
+router.get('/empresas/:id/productos', w(async (req, res) => {
+  res.json(await adminRepo.getProductosEmpresa(Number(req.params.id)));
+}));
+
+router.put('/empresas/:id/productos', w(async (req, res) => {
+  const { slug, activo } = req.body ?? {};
+  res.json(await adminRepo.setProductoEmpresa(Number(req.params.id), String(slug), !!activo));
+}));
+
+/** Módulos de Historias Clínicas activos por centro (Vaxa los prende/apaga).
+ *  Ya va detrás de requireRootTenant (solo Vaxa), como el resto de /api/admin. */
+router.get('/empresas/:id/hc-modulos', w(async (req, res) => {
+  res.json(await finanzasRepo.getModulosByEmpresaId(Number(req.params.id)));
+}));
+
+router.put('/empresas/:id/hc-modulos', w(async (req, res) => {
+  res.json(await finanzasRepo.setModulos(Number(req.params.id), req.body ?? {}));
 }));
 
 /** Redes/contacto de la landing pública de Vaxa (editable desde sistemas-vaxa). */

@@ -81,6 +81,21 @@ export async function loginService(dto: LoginDto, ip?: string): Promise<LoginRes
   let sesionPorProducto = false;
   if (dto.producto) {
     try {
+      // Producto desactivado por Vaxa para este centro → NADIE de ese centro entra a
+      // ese panel (aunque el usuario tenga su fila en usuario_producto). Solo bloquea
+      // si existe la fila empresa_producto y está en activo=0: así las cuentas legacy
+      // (sin vínculo de producto) y el tenant raíz de Vaxa no se ven afectadas.
+      if (usuario.tenant_slug !== ROOT_TENANT) {
+        const [epRow] = await pool.execute<any[]>(
+          `SELECT ep.activo FROM empresa_producto ep
+             JOIN productos p ON p.id = ep.producto_id
+            WHERE ep.empresa_id = ? AND p.slug = ? LIMIT 1`,
+          [usuario.empresa_id, dto.producto],
+        );
+        if ((epRow as any[]).length && !(epRow as any[])[0].activo) {
+          throw new AuthError('Este producto no está activo para tu centro. Contacta a Vaxa.', 403);
+        }
+      }
       const [acceso] = await pool.execute<any[]>(
         `SELECT r.nombre AS rol_nombre
          FROM usuario_producto up
@@ -116,6 +131,26 @@ export async function loginService(dto: LoginDto, ip?: string): Promise<LoginRes
       if (err instanceof AuthError) throw err;
       // ER_NO_SUCH_TABLE u otro problema de esquema → migración pendiente: no bloquear.
       console.warn('[auth] validación de producto omitida (¿migración pendiente?):', (err as Error).message);
+    }
+  }
+
+  // Terapeuta sin razón de ser: si el centro NO tiene ni "Historia clínica" ni
+  // "Agenda" activos, el rol TERAPEUTA no puede entrar (su trabajo es clínico/agenda).
+  // Solo admisión y administración usan el sistema en ese caso.
+  if (dto.producto === 'historias-clinicas' && String(rolEfectivo).toUpperCase() === 'TERAPEUTA') {
+    try {
+      const [mods] = await pool.execute<any[]>(
+        `SELECT modulo, activo FROM hc_modulos WHERE empresa_id = ? AND modulo IN ('historia','agenda')`,
+        [usuario.empresa_id],
+      );
+      // Sin fila => módulo ACTIVO (default). Solo está OFF si hay fila con activo=0.
+      const off = (m: string) => { const r = (mods as any[]).find((x) => x.modulo === m); return r ? !r.activo : false; };
+      if (off('historia') && off('agenda')) {
+        throw new AuthError('Tu centro no tiene módulos disponibles para terapeutas. Contacta a tu administrador.', 403);
+      }
+    } catch (err) {
+      if (err instanceof AuthError) throw err;
+      console.warn('[auth] chequeo de módulos de terapeuta omitido:', (err as Error).message);
     }
   }
 

@@ -1,6 +1,7 @@
 import { randomBytes } from 'crypto';
 import { getPool } from '../../db/pool';
 import { AppError } from '../../shared/errors';
+import { finanzasRepo } from './historias.finanzas.repository';
 
 /**
  * Repositorio del módulo Historias Clínicas (centros terapéuticos).
@@ -121,6 +122,20 @@ async function ensureServicioObjSes(): Promise<void> {
   _ensuredServObjSes = true;
 }
 
+/** Auto-agrega `duracion_min` a hc_servicios (minutos por sesión, para autocalcular la hora fin). */
+let _ensuredDuracion = false;
+async function ensureDuracionServicio(): Promise<void> {
+  if (_ensuredDuracion) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'hc_servicios' AND COLUMN_NAME = 'duracion_min' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query('ALTER TABLE hc_servicios ADD COLUMN duracion_min INT NOT NULL DEFAULT 45 AFTER precio');
+  }
+  _ensuredDuracion = true;
+}
+
 /** tenant_slug -> empresa_id (tenant). Igual criterio que el resto del sistema. */
 async function getEmpresaId(tenantSlug: string): Promise<number> {
   const [rows] = await pool().query<any[]>(
@@ -205,6 +220,7 @@ export interface ServicioDto {
   nombre: string;
   descripcion?: string | null;
   precio?: number | null;
+  duracion_min?: number | null;   // duración de la sesión en minutos (para autocalcular la hora fin de la cita)
   activo?: boolean;
 }
 
@@ -425,6 +441,27 @@ export const historiasRepo = {
     return res.affectedRows > 0;
   },
 
+  /**
+   * Elimina un paciente (solo ADMINISTRADOR). Si tiene historia clínica o ventas
+   * NO se borra (dato clínico/contable): se archiva (activo=0), que es reversible.
+   * Solo si está "vacío" se elimina de verdad (apoderados/citas/asignaciones/historia
+   * cascadean por FK; las ventas quedan con paciente en NULL). Devuelve el modo.
+   */
+  async eliminarPaciente(tenantSlug: string, id: number, userId?: number): Promise<{ modo: 'eliminada' | 'archivada' }> {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [ex] = await pool().query<any[]>('SELECT id FROM hc_pacientes WHERE empresa_id = ? AND id = ? LIMIT 1', [empresaId, id]);
+    if (!(ex as any[]).length) throw new AppError('Paciente no encontrado', 404);
+
+    const [hist] = await pool().query<any[]>('SELECT id FROM hc_historias WHERE empresa_id = ? AND paciente_id = ? LIMIT 1', [empresaId, id]);
+    const [vts]  = await pool().query<any[]>('SELECT id FROM hc_ventas WHERE empresa_id = ? AND paciente_id = ? LIMIT 1', [empresaId, id]);
+    if ((hist as any[]).length || (vts as any[]).length) {
+      await pool().query('UPDATE hc_pacientes SET activo = 0, user_actua_id = ? WHERE empresa_id = ? AND id = ?', [userId ?? null, empresaId, id]);
+      return { modo: 'archivada' };
+    }
+    await pool().query('DELETE FROM hc_pacientes WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    return { modo: 'eliminada' };
+  },
+
   /** Helper interno: trae un paciente ya sabiendo el empresa_id (evita re-resolver). */
   async getPacienteById(empresaId: number, id: number) {
     const [rows] = await pool().query<any[]>(
@@ -591,9 +628,10 @@ export const historiasRepo = {
 
   // ── Servicios del centro (catálogo por tenant) ────────────────────────────────
   async listServicios(tenantSlug: string, incluirInactivos = false) {
+    await ensureDuracionServicio();
     const empresaId = await getEmpresaId(tenantSlug);
     const [rows] = await pool().query<any[]>(
-      `SELECT id, nombre, descripcion, precio, activo FROM hc_servicios
+      `SELECT id, nombre, descripcion, precio, duracion_min, activo FROM hc_servicios
         WHERE empresa_id = ? ${incluirInactivos ? '' : 'AND activo = 1'}
         ORDER BY nombre`,
       [empresaId],
@@ -603,29 +641,33 @@ export const historiasRepo = {
 
   async createServicio(tenantSlug: string, dto: ServicioDto, userId?: number) {
     if (!dto.nombre?.trim()) throw new AppError('El nombre del servicio es requerido', 400);
+    await ensureDuracionServicio();
     const empresaId = await getEmpresaId(tenantSlug);
+    const dur = dto.duracion_min != null && Number(dto.duracion_min) > 0 ? Math.round(Number(dto.duracion_min)) : 45;
     const [res] = await pool().query<any>(
-      `INSERT INTO hc_servicios (empresa_id, nombre, descripcion, precio, user_crea_id) VALUES (?, ?, ?, ?, ?)`,
-      [empresaId, dto.nombre.trim(), dto.descripcion || null, Number(dto.precio) || 0, userId ?? null],
+      `INSERT INTO hc_servicios (empresa_id, nombre, descripcion, precio, duracion_min, user_crea_id) VALUES (?, ?, ?, ?, ?, ?)`,
+      [empresaId, dto.nombre.trim(), dto.descripcion || null, Number(dto.precio) || 0, dur, userId ?? null],
     );
-    const [rows] = await pool().query<any[]>('SELECT id, nombre, descripcion, precio, activo FROM hc_servicios WHERE id = ?', [res.insertId]);
+    const [rows] = await pool().query<any[]>('SELECT id, nombre, descripcion, precio, duracion_min, activo FROM hc_servicios WHERE id = ?', [res.insertId]);
     return rows[0];
   },
 
   async updateServicio(tenantSlug: string, id: number, dto: ServicioDto) {
+    await ensureDuracionServicio();
     const empresaId = await getEmpresaId(tenantSlug);
     const campos: string[] = [];
     const vals: any[] = [];
     const set = (c: string, v: any) => { campos.push(`${c} = ?`); vals.push(v); };
-    if (dto.nombre !== undefined)      set('nombre', dto.nombre.trim());
-    if (dto.descripcion !== undefined) set('descripcion', dto.descripcion || null);
-    if (dto.precio !== undefined)      set('precio', Number(dto.precio) || 0);
-    if (dto.activo !== undefined)      set('activo', dto.activo ? 1 : 0);
+    if (dto.nombre !== undefined)       set('nombre', dto.nombre.trim());
+    if (dto.descripcion !== undefined)  set('descripcion', dto.descripcion || null);
+    if (dto.precio !== undefined)       set('precio', Number(dto.precio) || 0);
+    if (dto.duracion_min !== undefined) set('duracion_min', Number(dto.duracion_min) > 0 ? Math.round(Number(dto.duracion_min)) : 45);
+    if (dto.activo !== undefined)       set('activo', dto.activo ? 1 : 0);
     if (!campos.length) return null;
     vals.push(empresaId, id);
     const [res] = await pool().query<any>(`UPDATE hc_servicios SET ${campos.join(', ')} WHERE empresa_id = ? AND id = ?`, vals);
     if (!res.affectedRows) return null;
-    const [rows] = await pool().query<any[]>('SELECT id, nombre, descripcion, precio, activo FROM hc_servicios WHERE id = ?', [id]);
+    const [rows] = await pool().query<any[]>('SELECT id, nombre, descripcion, precio, duracion_min, activo FROM hc_servicios WHERE id = ?', [id]);
     return rows[0];
   },
 
@@ -742,7 +784,10 @@ export const historiasRepo = {
     if (filtros.terapeutaId){ where.push('c.terapeuta_id = ?'); vals.push(filtros.terapeutaId); }
     if (filtros.pacienteId) { where.push('c.paciente_id = ?'); vals.push(filtros.pacienteId); }
     const [rows] = await pool().query<any[]>(
-      `SELECT c.*, e.nombre AS estado_nombre, s.nombre AS servicio_nombre,
+      `SELECT c.*,
+              DATE_FORMAT(c.inicio, '%Y-%m-%dT%H:%i:%s') AS inicio,
+              DATE_FORMAT(c.fin,    '%Y-%m-%dT%H:%i:%s') AS fin,
+              e.nombre AS estado_nombre, s.nombre AS servicio_nombre,
               CONCAT(p.nombres, ' ', p.apellidos) AS paciente_nombre,
               CONCAT(u.nombres, ' ', u.apellidos) AS terapeuta_nombre
          FROM hc_citas c
@@ -757,11 +802,64 @@ export const historiasRepo = {
     return rows;
   },
 
+  /** Saldo de sesiones de un servicio para un paciente: compradas (ventas emitidas)
+   *  menos usadas (citas no canceladas). `excluirCitaId` deja fuera una cita puntual
+   *  (para no contarla dos veces al reprogramar/cambiar su servicio). */
+  async _saldoSesiones(empresaId: number, pacienteId: number, servicioId: number, excluirCitaId?: number) {
+    const [[compra]] = await pool().query<any[]>(
+      `SELECT COALESCE(SUM(vi.cantidad), 0) AS comprado
+         FROM hc_venta_items vi
+         JOIN hc_ventas v ON v.id = vi.venta_id
+        WHERE vi.empresa_id = ? AND v.paciente_id = ? AND v.estado = 'emitida'
+          AND vi.tipo = 'servicio' AND vi.servicio_id = ?`,
+      [empresaId, pacienteId, servicioId],
+    ) as any;
+    const params: any[] = [empresaId, pacienteId, servicioId];
+    let excl = '';
+    if (excluirCitaId) { excl = 'AND id <> ?'; params.push(excluirCitaId); }
+    // Las citas CANCELADAS (estado 3) liberan la sesión; el resto (agendada/atendida/no asistió) la consumen.
+    const [[uso]] = await pool().query<any[]>(
+      `SELECT COUNT(*) AS consumido FROM hc_citas
+        WHERE empresa_id = ? AND paciente_id = ? AND servicio_id = ? AND estado_id <> 3 ${excl}`,
+      params,
+    ) as any;
+    const comprado = Number(compra?.comprado) || 0;
+    const consumido = Number(uso?.consumido) || 0;
+    return { comprado, consumido, saldo: comprado - consumido };
+  },
+
+  /** Saldo de sesiones para el frontend (incluye `requiere`: si el vínculo venta↔cita aplica). */
+  async saldoSesiones(tenantSlug: string, pacienteId: number, servicioId: number) {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const mods = await finanzasRepo.getModulosByEmpresaId(empresaId);
+    const requiere = !!(mods.ventas && mods.agenda);
+    const s = await this._saldoSesiones(empresaId, pacienteId, servicioId);
+    return { ...s, requiere };
+  },
+
+  /** Regla de negocio: con Ventas + Agenda activos, para agendar una cita de un servicio
+   *  el paciente debe tener saldo de sesiones (una venta emitida de ese servicio). */
+  async _verificarSaldoParaCita(empresaId: number, pacienteId: number, servicioId: number, excluirCitaId?: number) {
+    const mods = await finanzasRepo.getModulosByEmpresaId(empresaId);
+    if (!(mods.ventas && mods.agenda)) return;   // solo aplica con ambos módulos activos
+    const { comprado, consumido, saldo } = await this._saldoSesiones(empresaId, pacienteId, servicioId, excluirCitaId);
+    if (saldo < 1) {
+      throw new AppError(
+        comprado === 0
+          ? 'Este paciente no tiene una venta de este servicio. Registra la venta antes de agendar la cita.'
+          : `Sin sesiones disponibles de este servicio (compradas ${comprado}, usadas ${consumido}). Registra una nueva venta para seguir agendando.`,
+        409,
+      );
+    }
+  },
+
   async createCita(tenantSlug: string, dto: CitaDto, userId?: number) {
     if (!dto.paciente_id || !dto.terapeuta_id || !dto.inicio) {
       throw new AppError('Paciente, terapeuta y fecha/hora de inicio son requeridos', 400);
     }
     const empresaId = await getEmpresaId(tenantSlug);
+    // Vínculo venta↔cita: si la cita lleva servicio, exige saldo de sesiones (regla de negocio).
+    if (dto.servicio_id) await this._verificarSaldoParaCita(empresaId, dto.paciente_id, dto.servicio_id);
     const [res] = await pool().query<any>(
       `INSERT INTO hc_citas (empresa_id, paciente_id, terapeuta_id, servicio_id, inicio, fin, estado_id, motivo, user_crea_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -773,6 +871,15 @@ export const historiasRepo = {
 
   async updateCita(tenantSlug: string, id: number, dto: CitaUpdateDto, userId?: number) {
     const empresaId = await getEmpresaId(tenantSlug);
+    // Si se cambia el servicio de la cita a otro, ese nuevo servicio debe tener saldo.
+    if (dto.servicio_id) {
+      const [[cur]] = await pool().query<any[]>(
+        'SELECT paciente_id, servicio_id FROM hc_citas WHERE empresa_id = ? AND id = ? LIMIT 1', [empresaId, id],
+      ) as any;
+      if (cur && Number(cur.servicio_id) !== Number(dto.servicio_id)) {
+        await this._verificarSaldoParaCita(empresaId, cur.paciente_id, Number(dto.servicio_id), id);
+      }
+    }
     const campos: string[] = [];
     const vals: any[] = [];
     const set = (col: string, val: any) => { campos.push(`${col} = ?`); vals.push(val); };
@@ -792,10 +899,21 @@ export const historiasRepo = {
     return (await this.listCitasById(empresaId, id))[0];
   },
 
+  async deleteCita(tenantSlug: string, id: number) {
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [res] = await pool().query<any>(
+      'DELETE FROM hc_citas WHERE empresa_id = ? AND id = ?', [empresaId, id],
+    );
+    return res.affectedRows > 0;
+  },
+
   /** Helper: trae una cita con sus nombres resueltos (mismo shape que listCitas). */
   async listCitasById(empresaId: number, id: number) {
     const [rows] = await pool().query<any[]>(
-      `SELECT c.*, e.nombre AS estado_nombre, s.nombre AS servicio_nombre,
+      `SELECT c.*,
+              DATE_FORMAT(c.inicio, '%Y-%m-%dT%H:%i:%s') AS inicio,
+              DATE_FORMAT(c.fin,    '%Y-%m-%dT%H:%i:%s') AS fin,
+              e.nombre AS estado_nombre, s.nombre AS servicio_nombre,
               CONCAT(p.nombres, ' ', p.apellidos) AS paciente_nombre,
               CONCAT(u.nombres, ' ', u.apellidos) AS terapeuta_nombre
          FROM hc_citas c
@@ -1248,7 +1366,7 @@ export const historiasRepo = {
     }
 
     const [citas] = await pool().query<any[]>(
-      `SELECT c.inicio, c.estado_id, es.nombre AS estado_nombre, sv.nombre AS servicio_nombre,
+      `SELECT DATE_FORMAT(c.inicio, '%Y-%m-%dT%H:%i:%s') AS inicio, c.estado_id, es.nombre AS estado_nombre, sv.nombre AS servicio_nombre,
               CONCAT(u.nombres, ' ', u.apellidos) AS terapeuta_nombre
          FROM hc_citas c
          LEFT JOIN hc_cita_estado es ON es.id = c.estado_id

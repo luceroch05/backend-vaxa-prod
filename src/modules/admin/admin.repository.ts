@@ -283,6 +283,7 @@ export interface CrearEmpresaDto {
   ciclo_id?: number;        // ciclo de facturación (default: mensual)
   precio_certificado?: number; // solo modo "Pago por certificado": S/ por cert emitido (default 20)
   permite_diseno?: boolean; // servicio a medida (Lienzo) que activa Vaxa por empresa
+  productos?: string[];      // qué sistemas contrata: 'certificaciones' | 'historias-clinicas' (default: certificaciones)
 }
 
 export interface EditarEmpresaDto {
@@ -326,7 +327,10 @@ export const adminRepo = {
       `SELECT id, razon_social, tenant_slug, dominio, ruc, tipo_doc, logo_url, logo_cert_url, activo,
               permite_diseno, precio_certificado,
               creditos_disponibles, creditos_asignados_total,
-              (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos
+              (creditos_asignados_total - creditos_disponibles) AS creditos_consumidos,
+              (SELECT GROUP_CONCAT(p.slug) FROM empresa_producto ep
+                 JOIN productos p ON p.id = ep.producto_id
+                WHERE ep.empresa_id = empresas.id AND ep.activo = 1) AS productos
        FROM empresas ORDER BY razon_social`,
     );
     return rows;
@@ -473,21 +477,40 @@ export const adminRepo = {
     );
     const empresaId = res.insertId as number;
 
-    // Multi-producto: toda empresa nueva arranca contratando Certificaciones.
-    // Tolerante si la migración de productos aún no corrió.
-    try {
+    // Multi-producto: la empresa contrata los sistemas ELEGIDOS (Certificados y/o
+    // Historias Clínicas y/o los que se agreguen a futuro).
+    //   - productos = undefined (llamadas legacy sin el campo) → default certificaciones.
+    //   - productos = []  (cliente SOLO de servicio a medida: web/catálogo, sin SaaS) → SIN producto.
+    //   - productos = [...]                                                           → esos.
+    const productos = Array.isArray(dto.productos)
+      ? [...new Set(dto.productos.map((p) => String(p).trim()).filter(Boolean))]
+      : ['certificaciones'];
+    if (productos.length) try {
+      // Asegura que cada producto contratado exista en el catálogo. Si el seed no
+      // corrió en prod (p.ej. faltaba 'historias-clinicas'), sin esto el vínculo
+      // saldría vacío y la empresa no aparecería en su panel.
+      const NOMBRE_PROD: Record<string, string> = {
+        'certificaciones': 'Certificaciones',
+        'historias-clinicas': 'Historias Clínicas',
+      };
+      for (const slug of productos) {
+        await pool().query(
+          'INSERT IGNORE INTO productos (slug, nombre, interno) VALUES (?, ?, 0)',
+          [slug, NOMBRE_PROD[slug] ?? slug],
+        );
+      }
       await pool().query(
         `INSERT IGNORE INTO empresa_producto (empresa_id, producto_id)
-         SELECT ?, id FROM productos WHERE slug = 'certificaciones'`,
-        [empresaId],
+         SELECT ?, id FROM productos WHERE slug IN (?)`,
+        [empresaId, productos],
       );
     } catch (e) {
       console.warn('[admin] no se pudo vincular empresa↔producto (¿migración pendiente?):', (e as Error).message);
     }
 
-    // La empresa arranca con el plan elegido (o Básico por defecto), con suscripción
-    // vigente, así puede emitir desde el primer día. Tolerante si la migración de planes aún no corrió.
-    try {
+    // Setup de Certificados (plan + créditos) SOLO si contrató ese sistema. Si es
+    // solo Historias Clínicas, no arma nada de certificados.
+    if (productos.includes('certificaciones')) try {
       const planId = Number(dto.plan_id) || (await planRepo.getPlanIdBySlug('basico'));
       if (planId) {
         await planRepo.asignarPlan(empresaId, planId, Number(dto.ciclo_id) || 1);
@@ -562,6 +585,44 @@ export const adminRepo = {
   },
 
   /** Crea un usuario para una empresa (contraseña hasheada con bcrypt). */
+  /** Catálogo de sistemas disponibles (para elegir al registrar). Escalable: sale de la BD.
+   *  Excluye 'sistemas-vaxa': es el panel interno de Vaxa, no un sistema que se alquile. */
+  async listCatalogoProductos() {
+    const [rows] = await pool().query<any[]>(
+      "SELECT slug, nombre FROM productos WHERE activo = 1 AND slug <> 'sistemas-vaxa' ORDER BY id",
+    );
+    return rows;
+  },
+
+  /** Productos que el centro tiene contratados y si están activos (Vaxa los prende/apaga). */
+  async getProductosEmpresa(empresaId: number) {
+    if (!Number.isFinite(empresaId)) return [];   // id inválido (NaN) → sin productos, no revienta la query
+    const [rows] = await pool().query<any[]>(
+      `SELECT p.slug, p.nombre,
+              CASE WHEN ep.empresa_id IS NOT NULL AND ep.activo = 1 THEN 1 ELSE 0 END AS activo
+         FROM productos p
+         LEFT JOIN empresa_producto ep ON ep.producto_id = p.id AND ep.empresa_id = ?
+        WHERE p.activo = 1
+        ORDER BY p.nombre`,
+      [empresaId],
+    );
+    return rows;
+  },
+
+  /** Activa/desactiva un producto para el centro (crea el vínculo si no existía). */
+  async setProductoEmpresa(empresaId: number, slug: string, activo: boolean) {
+    if (!Number.isFinite(empresaId)) throw new Error('Empresa inválida');
+    const [prod] = await pool().query<any[]>('SELECT id FROM productos WHERE slug = ? LIMIT 1', [slug]);
+    if (!(prod as any[]).length) throw new Error('Producto no encontrado');
+    const productoId = (prod as any[])[0].id;
+    await pool().query(
+      `INSERT INTO empresa_producto (empresa_id, producto_id, activo) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE activo = VALUES(activo)`,
+      [empresaId, productoId, activo ? 1 : 0],
+    );
+    return this.getProductosEmpresa(empresaId);
+  },
+
   async crearUsuario(empresaId: number, dto: CrearUsuarioDto, userId?: number) {
     const correo = dto.correo?.toLowerCase().trim();
     if (!dto.nombres?.trim() || !dto.apellidos?.trim() || !correo || !dto.contrasena || !dto.rol_id) {

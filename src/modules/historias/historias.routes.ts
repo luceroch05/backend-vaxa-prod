@@ -2,6 +2,7 @@ import { Router } from 'express';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { historiasRepo } from './historias.repository';
+import { finanzasRepo, type HcModulo } from './historias.finanzas.repository';
 import { hcAuditoriaRepo, type HcAuditRef } from './hc-auditoria.repository';
 import { sendError } from '../../shared/errors';
 import { guardarAdjunto, esRutaAdjuntoValida, ADJUNTO_MAX_BYTES, TAREA_VIDEO_MAX_BYTES } from '../../shared/archivos';
@@ -113,7 +114,7 @@ function mapAuditoria(
     : { accion: 'editar', entidad: 'servicio', ref: { servicioId: idAt(1) } };
   if (segs[0] === 'citas')         return n === 1
     ? { accion: 'crear',  entidad: 'cita', ref: { pacienteIdBody: numBody('paciente_id') } }
-    : { accion: 'editar', entidad: 'cita', ref: { citaId: idAt(1) } };
+    : { accion: M === 'DELETE' ? 'eliminar' : 'editar', entidad: 'cita', ref: { citaId: idAt(1) } };
   if (segs[0] === 'adjuntos' && M === 'DELETE') return { accion: 'eliminar', entidad: 'adjunto', ref: { adjuntoId: idAt(1) } };
   if (segs[0] === 'terapeutas' && segs[2] === 'servicios') return { accion: 'editar', entidad: 'terapeuta_servicio', ref: { terapeutaId: idAt(1) } };
   return null;
@@ -183,6 +184,38 @@ router.get('/catalogos', w(async (_req, res) => {
   res.json(await historiasRepo.catalogos());
 }));
 
+// ── Config del centro: módulos activos (nav) + datos fiscales (comprobante) ────
+// Accesible a cualquier rol del tenant (recepción/dirección/terapeuta).
+router.get('/mi-config', w(async (req, res) => {
+  const [modulos, centro] = await Promise.all([
+    finanzasRepo.getModulos(tid(req)),
+    finanzasRepo.getCentro(tid(req)),
+  ]);
+  res.json({ modulos, centro });
+}));
+
+/** Bloquea la ruta si Vaxa apagó ese módulo para el centro (403 MODULO_INACTIVO). */
+const requireModulo = (modulo: HcModulo) =>
+  (req: Request, res: Response, next: NextFunction): void => {
+    finanzasRepo.getModulos(tid(req))
+      .then((m) => {
+        if (m[modulo]) { next(); return; }
+        res.status(403).json({ error: `El módulo «${modulo}» no está activo para este centro.`, code: 'MODULO_INACTIVO' });
+      })
+      .catch((e) => sendError(res, e, 'historias'));
+  };
+
+// El expediente clínico (historia, diagnósticos, objetivos, sesiones, tareas,
+// tratamientos, adjuntos) es su propio módulo: si Vaxa lo apagó, se bloquea de
+// raíz aunque el front intente entrar. Los datos del paciente y la agenda NO
+// dependen de esto (van por sus propios módulos). Va ANTES de definir esas rutas.
+router.use('/historias',     requireModulo('historia'));
+router.use('/objetivos',     requireModulo('historia'));
+router.use('/sesiones',      requireModulo('historia'));
+router.use('/tareas',        requireModulo('historia'));
+router.use('/tratamientos',  requireModulo('historia'));
+router.use('/adjuntos',      requireModulo('historia'));
+
 // ── Auditoría: bitácora de acciones (solo ADMINISTRADOR) ──────────────────────
 router.get('/auditoria', soloAdmin, w(async (req, res) => {
   res.json(await hcAuditoriaRepo.listar(tid(req), {
@@ -235,6 +268,11 @@ router.patch('/pacientes/:id/activo', soloAdmin, w(async (req, res) => {
   res.status(204).send();
 }));
 
+// Eliminar paciente (solo ADMINISTRADOR). Borra si está vacío; si tiene historia/ventas lo archiva.
+router.delete('/pacientes/:id', soloAdmin, w(async (req, res) => {
+  res.json(await historiasRepo.eliminarPaciente(tid(req), Number(req.params.id), uid(req)));
+}));
+
 // ── Asignación de terapeuta ───────────────────────────────────────────────────
 router.get('/pacientes/:id/terapeutas', w(async (req, res) => {
   res.json(await historiasRepo.listAsignaciones(tid(req), Number(req.params.id)));
@@ -254,13 +292,13 @@ router.delete('/asignaciones/:asignacionId', gestionaPaciente, w(async (req, res
 }));
 
 // ── Historia clínica (cabecera + anamnesis) ───────────────────────────────────
-router.get('/pacientes/:id/historia', w(async (req, res) => {
+router.get('/pacientes/:id/historia', requireModulo('historia'), w(async (req, res) => {
   const h = await historiasRepo.getHistoriaByPaciente(tid(req), Number(req.params.id));
   if (!h) { res.status(404).json({ error: 'Historia no abierta' }); return; }
   res.json(h);
 }));
 
-router.post('/pacientes/:id/historia', escribeClinico, w(async (req, res) => {
+router.post('/pacientes/:id/historia', escribeClinico, requireModulo('historia'), w(async (req, res) => {
   const h = await historiasRepo.abrirHistoria(tid(req), Number(req.params.id), req.body ?? {}, uid(req));
   res.status(201).json(h);
 }));
@@ -412,10 +450,10 @@ router.get('/servicios', w(async (req, res) => {
   const todos = req.query.todos === '1' || req.query.todos === 'true';
   res.json(await historiasRepo.listServicios(tid(req), todos));
 }));
-router.post('/servicios', gestionaPaciente, w(async (req, res) => {
+router.post('/servicios', gestionaPaciente, requireModulo('servicios'), w(async (req, res) => {
   res.status(201).json(await historiasRepo.createServicio(tid(req), req.body ?? {}, uid(req)));
 }));
-router.patch('/servicios/:id', gestionaPaciente, w(async (req, res) => {
+router.patch('/servicios/:id', gestionaPaciente, requireModulo('servicios'), w(async (req, res) => {
   const s = await historiasRepo.updateServicio(tid(req), Number(req.params.id), req.body ?? {});
   if (!s) { res.status(404).json({ error: 'Servicio no encontrado' }); return; }
   res.json(s);
@@ -447,6 +485,13 @@ router.get('/citas', w(async (req, res) => {
   res.json(await historiasRepo.listCitas(tid(req), filtros));
 }));
 
+// Saldo de sesiones de un servicio para un paciente (para el modal de agendar).
+router.get('/pacientes/:id/saldo-sesiones', gestionaPaciente, w(async (req, res) => {
+  const servicioId = Number(req.query.servicio_id);
+  if (!servicioId) { res.status(400).json({ error: 'servicio_id requerido' }); return; }
+  res.json(await historiasRepo.saldoSesiones(tid(req), Number(req.params.id), servicioId));
+}));
+
 router.post('/citas', gestionaPaciente, w(async (req, res) => {
   res.status(201).json(await historiasRepo.createCita(tid(req), req.body ?? {}, uid(req)));
 }));
@@ -455,6 +500,12 @@ router.patch('/citas/:id', gestionaPaciente, w(async (req, res) => {
   const c = await historiasRepo.updateCita(tid(req), Number(req.params.id), req.body ?? {}, uid(req));
   if (!c) { res.status(404).json({ error: 'Cita no encontrada' }); return; }
   res.json(c);
+}));
+
+router.delete('/citas/:id', gestionaPaciente, w(async (req, res) => {
+  const ok = await historiasRepo.deleteCita(tid(req), Number(req.params.id));
+  if (!ok) { res.status(404).json({ error: 'Cita no encontrada' }); return; }
+  res.json({ ok: true });
 }));
 
 // ── Adjuntos de la historia (informes, PDFs, exámenes) ────────────────────────
