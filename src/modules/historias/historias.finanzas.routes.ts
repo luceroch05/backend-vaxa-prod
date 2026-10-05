@@ -49,6 +49,7 @@ const router = Router();
 router.use(gestionaFinanzas);
 router.use('/productos', requireModulo('inventario'));
 router.use('/ventas',    requireModulo('ventas'));
+router.use('/paquetes',  requireModulo('ventas'));
 router.use('/caja',      requireModulo('caja'));
 
 // ── Inventario / Productos ─────────────────────────────────────────────────────
@@ -97,6 +98,26 @@ router.post('/ventas', w(async (req, res) => {
 
 router.post('/ventas/:id/anular', soloAdmin, w(async (req, res) => {
   res.json(await finanzasRepo.anularVenta(tid(req), Number(req.params.id), uid(req)));
+}));
+
+// ── Paquetes / combos (tarifas vendibles) ────────────────────────────────────────
+router.get('/paquetes', w(async (req, res) => {
+  const todos = req.query.todos === '1' || req.query.todos === 'true';
+  res.json(await finanzasRepo.listPaquetes(tid(req), todos));
+}));
+
+router.post('/paquetes', w(async (req, res) => {
+  res.status(201).json(await finanzasRepo.createPaquete(tid(req), req.body ?? {}, uid(req)));
+}));
+
+router.patch('/paquetes/:id', w(async (req, res) => {
+  const p = await finanzasRepo.updatePaquete(tid(req), Number(req.params.id), req.body ?? {});
+  if (!p) { res.status(404).json({ error: 'Paquete no encontrado' }); return; }
+  res.json(p);
+}));
+
+router.delete('/paquetes/:id', soloAdmin, w(async (req, res) => {
+  res.json(await finanzasRepo.deletePaquete(tid(req), Number(req.params.id)));
 }));
 
 // ── Caja: ingresos / egresos ─────────────────────────────────────────────────────

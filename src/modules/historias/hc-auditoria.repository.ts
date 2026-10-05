@@ -64,12 +64,14 @@ export interface HcAuditRef {
   adjuntoId?: number;
   asignacionId?: number;
   servicioId?: number;
+  motivoId?: number;
   terapeutaId?: number;
   // Del body (para acciones de creación donde el id aún no está en la ruta):
   nombres?: string;          // crear paciente
   apellidos?: string;        // crear paciente
   pacienteIdBody?: number;   // crear cita
   servicioNombre?: string;   // crear servicio
+  motivoNombre?: string;     // crear motivo
   activo?: boolean;          // activar/desactivar paciente
 }
 
@@ -144,8 +146,17 @@ async function resolverServicio(empresaId: number, id?: number): Promise<string 
   } catch { return null; }
 }
 
+/** Nombre de un motivo de cita por id. */
+async function resolverMotivo(empresaId: number, id?: number): Promise<string | null> {
+  if (!id) return null;
+  try {
+    const [r] = await pool().query<any[]>('SELECT nombre AS n FROM hc_motivos WHERE id = ? AND empresa_id = ?', [id, empresaId]);
+    return (r as any[])[0]?.n?.trim() || null;
+  } catch { return null; }
+}
+
 /** Arma la frase específica de la acción con los nombres ya resueltos. */
-function describir(accion: string, entidad: string, ctx: { paciente: string | null; servicio: string | null; terapeuta: string | null; activo?: boolean }): string {
+function describir(accion: string, entidad: string, ctx: { paciente: string | null; servicio: string | null; motivo: string | null; terapeuta: string | null; activo?: boolean }): string {
   const de = ctx.paciente ? `de ${ctx.paciente}` : 'de un paciente';
   const a  = ctx.paciente ? `a ${ctx.paciente}` : 'a un paciente';
   const para = ctx.paciente ? `para ${ctx.paciente}` : 'para un paciente';
@@ -174,6 +185,9 @@ function describir(accion: string, entidad: string, ctx: { paciente: string | nu
     case 'tratamiento:eliminar': return `Eliminó un tratamiento ${de}`;
     case 'servicio:crear':     return `Creó el servicio "${ctx.servicio ?? '(nuevo)'}"`;
     case 'servicio:editar':    return `Editó el servicio "${ctx.servicio ?? ''}"`.trim();
+    case 'motivo:crear':       return `Creó el motivo de cita "${ctx.motivo ?? '(nuevo)'}"`;
+    case 'motivo:editar':      return `Editó el motivo de cita "${ctx.motivo ?? ''}"`.trim();
+    case 'motivo:eliminar':    return `Eliminó el motivo de cita "${ctx.motivo ?? ''}"`.trim();
     case 'cita:crear':         return `Agendó una cita ${para}`;
     case 'cita:editar':        return `Editó una cita ${de}`;
     case 'asignacion:asignar': return `Asignó ${ctx.terapeuta ? `al terapeuta ${ctx.terapeuta}` : 'un terapeuta'} ${a}`;
@@ -219,17 +233,19 @@ export const hcAuditoriaRepo = {
       }
 
       // Resolución de nombres para la frase específica.
-      const [paciente, servicioPorId, terapeuta] = await Promise.all([
+      const [paciente, servicioPorId, motivoPorId, terapeuta] = await Promise.all([
         resolverPaciente(empresaId, ref),
         resolverServicio(empresaId, ref.servicioId),
+        resolverMotivo(empresaId, ref.motivoId),
         resolverUsuario(ref.terapeutaId),
       ]);
       const servicio = servicioPorId ?? ref.servicioNombre ?? null;
-      const descripcion = describir(evt.accion, evt.entidad, { paciente, servicio, terapeuta, activo: ref.activo });
+      const motivo = motivoPorId ?? ref.motivoNombre ?? null;
+      const descripcion = describir(evt.accion, evt.entidad, { paciente, servicio, motivo, terapeuta, activo: ref.activo });
 
       // Id de referencia guardado: el del paciente cuando aplica (útil para filtrar/ligar).
       const entidadId = ref.pacienteId ?? ref.pacienteIdBody ?? ref.historiaId ?? ref.objetivoId ?? ref.sesionId
-        ?? ref.tareaId ?? ref.tratamientoId ?? ref.citaId ?? ref.servicioId ?? ref.asignacionId ?? ref.adjuntoId ?? null;
+        ?? ref.tareaId ?? ref.tratamientoId ?? ref.citaId ?? ref.servicioId ?? ref.motivoId ?? ref.asignacionId ?? ref.adjuntoId ?? null;
 
       await pool().query(
         `INSERT INTO hc_auditoria

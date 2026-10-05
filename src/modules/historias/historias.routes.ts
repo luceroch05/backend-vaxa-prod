@@ -112,6 +112,9 @@ function mapAuditoria(
   if (segs[0] === 'servicios')     return n === 1
     ? { accion: 'crear',  entidad: 'servicio', ref: { servicioNombre: body?.nombre } }
     : { accion: 'editar', entidad: 'servicio', ref: { servicioId: idAt(1) } };
+  if (segs[0] === 'motivos')       return n === 1
+    ? { accion: 'crear',  entidad: 'motivo', ref: { motivoNombre: body?.nombre } }
+    : { accion: M === 'DELETE' ? 'eliminar' : 'editar', entidad: 'motivo', ref: { motivoId: idAt(1) } };
   if (segs[0] === 'citas')         return n === 1
     ? { accion: 'crear',  entidad: 'cita', ref: { pacienteIdBody: numBody('paciente_id') } }
     : { accion: M === 'DELETE' ? 'eliminar' : 'editar', entidad: 'cita', ref: { citaId: idAt(1) } };
@@ -459,6 +462,24 @@ router.patch('/servicios/:id', gestionaPaciente, requireModulo('servicios'), w(a
   res.json(s);
 }));
 
+// ── Motivos de cita (tipos con precio, por servicio) ──────────────────────────
+router.get('/motivos', w(async (req, res) => {
+  const servicioId = req.query.servicio_id ? Number(req.query.servicio_id) : undefined;
+  const todos = req.query.todos === '1' || req.query.todos === 'true';
+  res.json(await historiasRepo.listMotivos(tid(req), servicioId, todos));
+}));
+router.post('/motivos', gestionaPaciente, requireModulo('servicios'), w(async (req, res) => {
+  res.status(201).json(await historiasRepo.createMotivo(tid(req), req.body ?? {}, uid(req)));
+}));
+router.patch('/motivos/:id', gestionaPaciente, requireModulo('servicios'), w(async (req, res) => {
+  const m = await historiasRepo.updateMotivo(tid(req), Number(req.params.id), req.body ?? {});
+  if (!m) { res.status(404).json({ error: 'Motivo no encontrado' }); return; }
+  res.json(m);
+}));
+router.delete('/motivos/:id', gestionaPaciente, requireModulo('servicios'), w(async (req, res) => {
+  res.json(await historiasRepo.deleteMotivo(tid(req), Number(req.params.id)));
+}));
+
 // ── Servicios que brinda cada terapeuta ───────────────────────────────────────
 router.get('/terapeutas/:id/servicios', w(async (req, res) => {
   res.json(await historiasRepo.getServiciosDeTerapeuta(tid(req), Number(req.params.id)));
@@ -487,9 +508,10 @@ router.get('/citas', w(async (req, res) => {
 
 // Saldo de sesiones de un servicio para un paciente (para el modal de agendar).
 router.get('/pacientes/:id/saldo-sesiones', gestionaPaciente, w(async (req, res) => {
-  const servicioId = Number(req.query.servicio_id);
-  if (!servicioId) { res.status(400).json({ error: 'servicio_id requerido' }); return; }
-  res.json(await historiasRepo.saldoSesiones(tid(req), Number(req.params.id), servicioId));
+  const servicioId = req.query.servicio_id ? Number(req.query.servicio_id) : undefined;
+  const motivoId   = req.query.motivo_id ? Number(req.query.motivo_id) : undefined;
+  if (!servicioId && !motivoId) { res.status(400).json({ error: 'servicio_id o motivo_id requerido' }); return; }
+  res.json(await historiasRepo.saldoSesiones(tid(req), Number(req.params.id), servicioId, motivoId));
 }));
 
 router.post('/citas', gestionaPaciente, w(async (req, res) => {

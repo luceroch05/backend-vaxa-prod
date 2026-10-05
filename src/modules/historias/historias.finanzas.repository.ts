@@ -149,6 +149,39 @@ async function ensureFinanzas(): Promise<void> {
        CONSTRAINT fk_hcmod_empresa FOREIGN KEY (empresa_id) REFERENCES empresas(id) ON DELETE CASCADE
      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
   );
+  // Enlace de la línea de venta a un MOTIVO (saldo por motivo) y al PAQUETE del que salió.
+  // Ver scripts/mysql-hc-motivos.sql (motivo_id) y scripts/mysql-hc-paquetes.sql (paquete_id).
+  for (const colv of ['motivo_id', 'paquete_id']) {
+    const [c] = await pool().query<any[]>(
+      `SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'hc_venta_items' AND COLUMN_NAME = ? LIMIT 1`,
+      [colv],
+    );
+    if (!(c as any[]).length) await pool().query(`ALTER TABLE hc_venta_items ADD COLUMN ${colv} INT NULL`);
+  }
+  // Paquetes / combos (tarifa vendible = N líneas motivo×cantidad a precio total).
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS hc_paquetes (
+       id INT AUTO_INCREMENT PRIMARY KEY, empresa_id INT NOT NULL, servicio_id INT DEFAULT NULL,
+       nombre VARCHAR(160) NOT NULL, descripcion VARCHAR(255) DEFAULT NULL,
+       precio_total DECIMAL(10,2) NOT NULL DEFAULT 0, activo TINYINT(1) NOT NULL DEFAULT 1,
+       user_crea_id INT DEFAULT NULL,
+       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+       CONSTRAINT fk_hcpaq_empresa  FOREIGN KEY (empresa_id)  REFERENCES empresas(id)     ON DELETE CASCADE,
+       CONSTRAINT fk_hcpaq_servicio FOREIGN KEY (servicio_id) REFERENCES hc_servicios(id) ON DELETE SET NULL,
+       INDEX idx_hcpaq_empresa (empresa_id), UNIQUE KEY uq_hcpaq (empresa_id, nombre)
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS hc_paquete_lineas (
+       id INT AUTO_INCREMENT PRIMARY KEY, empresa_id INT NOT NULL, paquete_id INT NOT NULL,
+       motivo_id INT NOT NULL, cantidad INT NOT NULL DEFAULT 1, orden INT NOT NULL DEFAULT 0,
+       CONSTRAINT fk_hcpl_empresa FOREIGN KEY (empresa_id) REFERENCES empresas(id)    ON DELETE CASCADE,
+       CONSTRAINT fk_hcpl_paquete FOREIGN KEY (paquete_id) REFERENCES hc_paquetes(id) ON DELETE CASCADE,
+       INDEX idx_hcpl_paquete (paquete_id), INDEX idx_hcpl_motivo (motivo_id)
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
   _ensuredFinanzas = true;
 }
 
@@ -171,12 +204,24 @@ export interface ProductoDto {
 }
 
 export interface VentaItemDto {
-  tipo: 'servicio' | 'producto';
+  tipo: 'servicio' | 'producto' | 'motivo' | 'paquete';
   servicio_id?: number | null;
+  motivo_id?: number | null;     // vender un motivo suelto (sesión, evaluación…) o línea de paquete
+  paquete_id?: number | null;    // vender un paquete/combo (se explota en sus líneas)
   producto_id?: number | null;
   cantidad?: number | null;
   precio_unit?: number | null;   // opcional; si no viene se toma del catálogo
   descuento?: number | null;     // descuento de la línea en S/ (ya resuelto de %→monto)
+}
+
+export interface PaqueteLineaDto { motivo_id: number; cantidad?: number | null; }
+export interface PaqueteDto {
+  servicio_id?: number | null;
+  nombre?: string;
+  descripcion?: string | null;
+  precio_total?: number | null;
+  activo?: boolean;
+  lineas?: PaqueteLineaDto[];    // reemplaza el set completo de líneas al guardar
 }
 export interface PagoDto { metodo: string; monto: number; }
 export interface VentaDto {
@@ -412,19 +457,60 @@ export const finanzasRepo = {
 
       // Resolver cada línea (precio + nombre snapshot) y validar stock de productos.
       // `subtotal` es el NETO de la línea (bruto − descuento de línea, no negativo).
-      const lineas: { tipo: string; servicio_id: number | null; producto_id: number | null;
-                      descripcion: string; cantidad: number; precio_unit: number; descuento: number; subtotal: number }[] = [];
+      const lineas: { tipo: string; servicio_id: number | null; motivo_id: number | null; paquete_id: number | null;
+                      producto_id: number | null; descripcion: string; cantidad: number;
+                      precio_unit: number; descuento: number; subtotal: number }[] = [];
       for (const it of items) {
         const cantidad = Number(it.cantidad) || 1;
         if (cantidad <= 0) throw new AppError('La cantidad debe ser mayor a 0', 400);
 
-        if (it.tipo === 'servicio') {
+        if (it.tipo === 'paquete') {
+          // Paquete/combo: se guarda como UNA línea con el PRECIO (nombre + precio total del
+          // paquete) y, debajo, una línea por cada motivo SIN precio (solo para cargar el saldo
+          // de sesiones por motivo). Así el comprobante muestra el combo con su precio y qué incluye.
+          const [pr] = await conn.query<any[]>('SELECT id, nombre, precio_total FROM hc_paquetes WHERE empresa_id = ? AND id = ? AND activo = 1 LIMIT 1', [empresaId, it.paquete_id]);
+          if (!pr.length) throw new AppError('Paquete no encontrado en la venta', 400);
+          const [pls] = await conn.query<any[]>(
+            `SELECT pl.motivo_id, pl.cantidad, m.nombre, m.servicio_id, sv.nombre AS servicio_nombre
+               FROM hc_paquete_lineas pl
+               JOIN hc_motivos m ON m.id = pl.motivo_id
+               LEFT JOIN hc_servicios sv ON sv.id = m.servicio_id
+              WHERE pl.empresa_id = ? AND pl.paquete_id = ? ORDER BY pl.orden, pl.id`,
+            [empresaId, it.paquete_id],
+          );
+          if (!pls.length) throw new AppError(`El paquete "${pr[0].nombre}" no tiene líneas configuradas`, 400);
+          const veces = cantidad;   // comprar el paquete N veces
+          const precioTotal = +((Number(pr[0].precio_total) || 0) * veces).toFixed(2);
+          // Línea cabecera: lleva el nombre y el precio del paquete.
+          lineas.push({
+            tipo: 'paquete', servicio_id: null, motivo_id: null, paquete_id: Number(pr[0].id),
+            producto_id: null, descripcion: pr[0].nombre, cantidad: veces,
+            precio_unit: Number(pr[0].precio_total) || 0, descuento: 0, subtotal: precioTotal,
+          });
+          // Líneas de contenido: "Área · Motivo" × cantidad, sin precio (va en la cabecera).
+          for (const l of pls) {
+            const desc = l.servicio_nombre ? `${l.servicio_nombre} · ${l.nombre}` : l.nombre;
+            lineas.push({
+              tipo: 'servicio', servicio_id: Number(l.servicio_id) || null, motivo_id: Number(l.motivo_id), paquete_id: Number(pr[0].id),
+              producto_id: null, descripcion: desc, cantidad: (Number(l.cantidad) || 1) * veces,
+              precio_unit: 0, descuento: 0, subtotal: 0,
+            });
+          }
+        } else if (it.tipo === 'motivo') {
+          // Vender un motivo suelto (sesión, evaluación…): su precio sale del catálogo de motivos.
+          const [r] = await conn.query<any[]>('SELECT nombre, precio, servicio_id FROM hc_motivos WHERE empresa_id = ? AND id = ? LIMIT 1', [empresaId, it.motivo_id]);
+          if (!r.length) throw new AppError('Motivo no encontrado en la venta', 400);
+          const precio = it.precio_unit != null ? Number(it.precio_unit) : Number(r[0].precio) || 0;
+          const bruto = precio * cantidad;
+          const desc = Math.min(Math.max(Number(it.descuento) || 0, 0), bruto);
+          lineas.push({ tipo: 'servicio', servicio_id: Number(r[0].servicio_id) || null, motivo_id: Number(it.motivo_id), paquete_id: null, producto_id: null, descripcion: r[0].nombre, cantidad, precio_unit: precio, descuento: +desc.toFixed(2), subtotal: +(bruto - desc).toFixed(2) });
+        } else if (it.tipo === 'servicio') {
           const [r] = await conn.query<any[]>('SELECT nombre, precio FROM hc_servicios WHERE empresa_id = ? AND id = ? LIMIT 1', [empresaId, it.servicio_id]);
           if (!r.length) throw new AppError('Servicio no encontrado en la venta', 400);
           const precio = it.precio_unit != null ? Number(it.precio_unit) : Number(r[0].precio) || 0;
           const bruto = precio * cantidad;
           const desc = Math.min(Math.max(Number(it.descuento) || 0, 0), bruto);
-          lineas.push({ tipo: 'servicio', servicio_id: Number(it.servicio_id), producto_id: null, descripcion: r[0].nombre, cantidad, precio_unit: precio, descuento: +desc.toFixed(2), subtotal: +(bruto - desc).toFixed(2) });
+          lineas.push({ tipo: 'servicio', servicio_id: Number(it.servicio_id), motivo_id: it.motivo_id ? Number(it.motivo_id) : null, paquete_id: null, producto_id: null, descripcion: r[0].nombre, cantidad, precio_unit: precio, descuento: +desc.toFixed(2), subtotal: +(bruto - desc).toFixed(2) });
         } else if (it.tipo === 'producto') {
           const [r] = await conn.query<any[]>('SELECT nombre, precio_venta, stock FROM hc_productos WHERE empresa_id = ? AND id = ? LIMIT 1 FOR UPDATE', [empresaId, it.producto_id]);
           if (!r.length) throw new AppError('Producto no encontrado en la venta', 400);
@@ -432,9 +518,9 @@ export const finanzasRepo = {
           const precio = it.precio_unit != null ? Number(it.precio_unit) : Number(r[0].precio_venta) || 0;
           const bruto = precio * cantidad;
           const desc = Math.min(Math.max(Number(it.descuento) || 0, 0), bruto);
-          lineas.push({ tipo: 'producto', servicio_id: null, producto_id: Number(it.producto_id), descripcion: r[0].nombre, cantidad, precio_unit: precio, descuento: +desc.toFixed(2), subtotal: +(bruto - desc).toFixed(2) });
+          lineas.push({ tipo: 'producto', servicio_id: null, motivo_id: null, paquete_id: null, producto_id: Number(it.producto_id), descripcion: r[0].nombre, cantidad, precio_unit: precio, descuento: +desc.toFixed(2), subtotal: +(bruto - desc).toFixed(2) });
         } else {
-          throw new AppError('Tipo de ítem inválido (servicio|producto)', 400);
+          throw new AppError('Tipo de ítem inválido (servicio|motivo|paquete|producto)', 400);
         }
       }
 
@@ -469,9 +555,9 @@ export const finanzasRepo = {
 
       for (const l of lineas) {
         await conn.query(
-          `INSERT INTO hc_venta_items (empresa_id, venta_id, tipo, servicio_id, producto_id, descripcion, cantidad, precio_unit, descuento, subtotal)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [empresaId, ventaId, l.tipo, l.servicio_id, l.producto_id, l.descripcion, l.cantidad, l.precio_unit, l.descuento, l.subtotal],
+          `INSERT INTO hc_venta_items (empresa_id, venta_id, tipo, servicio_id, motivo_id, paquete_id, producto_id, descripcion, cantidad, precio_unit, descuento, subtotal)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [empresaId, ventaId, l.tipo, l.servicio_id, l.motivo_id, l.paquete_id, l.producto_id, l.descripcion, l.cantidad, l.precio_unit, l.descuento, l.subtotal],
         );
         if (l.tipo === 'producto' && l.producto_id) {
           await conn.query('UPDATE hc_productos SET stock = stock - ? WHERE empresa_id = ? AND id = ?', [l.cantidad, empresaId, l.producto_id]);
@@ -551,6 +637,113 @@ export const finanzasRepo = {
     } finally {
       conn.release();
     }
+  },
+
+  // ── Paquetes / combos (tarifa vendible = N líneas motivo×cantidad) ──────────────
+  async listPaquetes(tenantSlug: string, incluirInactivos = false) {
+    await ensureFinanzas();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [paqs] = await pool().query<any[]>(
+      `SELECT p.id, p.servicio_id, s.nombre AS servicio_nombre, p.nombre, p.descripcion, p.precio_total, p.activo
+         FROM hc_paquetes p LEFT JOIN hc_servicios s ON s.id = p.servicio_id
+        WHERE p.empresa_id = ? ${incluirInactivos ? '' : 'AND p.activo = 1'}
+        ORDER BY s.nombre, p.nombre`,
+      [empresaId],
+    );
+    if (!paqs.length) return [];
+    const ids = paqs.map((p) => p.id);
+    const [lineas] = await pool().query<any[]>(
+      `SELECT pl.id, pl.paquete_id, pl.motivo_id, pl.cantidad, pl.orden,
+              m.nombre AS motivo_nombre, m.precio AS motivo_precio, m.servicio_id AS motivo_servicio_id,
+              sv.nombre AS motivo_servicio_nombre
+         FROM hc_paquete_lineas pl
+         JOIN hc_motivos m ON m.id = pl.motivo_id
+         LEFT JOIN hc_servicios sv ON sv.id = m.servicio_id
+        WHERE pl.empresa_id = ? AND pl.paquete_id IN (${ids.map(() => '?').join(',')})
+        ORDER BY pl.orden, pl.id`,
+      [empresaId, ...ids],
+    );
+    const porPaq = new Map<number, any[]>();
+    for (const l of lineas) {
+      const arr = porPaq.get(l.paquete_id) ?? [];
+      arr.push(l); porPaq.set(l.paquete_id, arr);
+    }
+    return paqs.map((p) => ({ ...p, lineas: porPaq.get(p.id) ?? [] }));
+  },
+
+  async getPaquete(tenantSlug: string, id: number) {
+    const list = await this.listPaquetes(tenantSlug, true);
+    return (list as any[]).find((p) => p.id === id) ?? null;
+  },
+
+  /** Reemplaza el set completo de líneas de un paquete (dentro de la transacción del padre). */
+  async _setPaqueteLineas(conn: any, empresaId: number, paqueteId: number, lineas: PaqueteLineaDto[]) {
+    await conn.query('DELETE FROM hc_paquete_lineas WHERE empresa_id = ? AND paquete_id = ?', [empresaId, paqueteId]);
+    let orden = 0;
+    for (const l of lineas) {
+      if (!l?.motivo_id) continue;
+      const qty = Math.max(1, Math.round(Number(l.cantidad) || 1));
+      await conn.query(
+        'INSERT INTO hc_paquete_lineas (empresa_id, paquete_id, motivo_id, cantidad, orden) VALUES (?, ?, ?, ?, ?)',
+        [empresaId, paqueteId, Number(l.motivo_id), qty, orden++],
+      );
+    }
+  },
+
+  async createPaquete(tenantSlug: string, dto: PaqueteDto, userId?: number) {
+    if (!dto.nombre?.trim()) throw new AppError('El nombre del paquete es requerido', 400);
+    if (!dto.lineas?.length) throw new AppError('El paquete necesita al menos una línea (motivo × cantidad)', 400);
+    await ensureFinanzas();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      const [res] = await conn.query<any>(
+        `INSERT INTO hc_paquetes (empresa_id, servicio_id, nombre, descripcion, precio_total, user_crea_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [empresaId, dto.servicio_id ?? null, dto.nombre.trim(), dto.descripcion || null, Number(dto.precio_total) || 0, userId ?? null],
+      );
+      await this._setPaqueteLineas(conn, empresaId, res.insertId, dto.lineas);
+      await conn.commit();
+      return this.getPaquete(tenantSlug, res.insertId);
+    } catch (e) { await conn.rollback(); throw e; } finally { conn.release(); }
+  },
+
+  async updatePaquete(tenantSlug: string, id: number, dto: PaqueteDto) {
+    await ensureFinanzas();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const conn = await pool().getConnection();
+    try {
+      await conn.beginTransaction();
+      const campos: string[] = [];
+      const vals: any[] = [];
+      const set = (c: string, v: any) => { campos.push(`${c} = ?`); vals.push(v); };
+      if (dto.servicio_id !== undefined)  set('servicio_id', dto.servicio_id ?? null);
+      if (dto.nombre !== undefined)       set('nombre', (dto.nombre || '').trim());
+      if (dto.descripcion !== undefined)  set('descripcion', dto.descripcion || null);
+      if (dto.precio_total !== undefined) set('precio_total', Number(dto.precio_total) || 0);
+      if (dto.activo !== undefined)       set('activo', dto.activo ? 1 : 0);
+      if (campos.length) {
+        vals.push(empresaId, id);
+        await conn.query(`UPDATE hc_paquetes SET ${campos.join(', ')} WHERE empresa_id = ? AND id = ?`, vals);
+      }
+      if (dto.lineas !== undefined) await this._setPaqueteLineas(conn, empresaId, id, dto.lineas);
+      await conn.commit();
+      return this.getPaquete(tenantSlug, id);
+    } catch (e) { await conn.rollback(); throw e; } finally { conn.release(); }
+  },
+
+  /** Borra el paquete; si ya se vendió lo DESACTIVA (preserva las ventas). */
+  async deletePaquete(tenantSlug: string, id: number) {
+    await ensureFinanzas();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [[uso]] = await pool().query<any[]>('SELECT COUNT(*) AS n FROM hc_venta_items WHERE paquete_id = ?', [id]) as any;
+    if (Number(uso?.n) > 0) {
+      await pool().query('UPDATE hc_paquetes SET activo = 0 WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+      return { modo: 'desactivado' as const };
+    }
+    await pool().query('DELETE FROM hc_paquetes WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    return { modo: 'eliminado' as const };
   },
 
   // ── Caja: ingresos / egresos ───────────────────────────────────────────────────

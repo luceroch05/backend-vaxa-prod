@@ -136,6 +136,39 @@ async function ensureDuracionServicio(): Promise<void> {
   _ensuredDuracion = true;
 }
 
+/** Auto-crea `hc_motivos` (motivos de cita por servicio con precio+duración) y las
+ *  columnas de enlace `motivo_id` en hc_citas / hc_venta_items, por si la migración
+ *  (scripts/mysql-hc-motivos.sql) no corrió en prod. Así nada falla de raíz. */
+let _ensuredMotivos = false;
+async function ensureMotivos(): Promise<void> {
+  if (_ensuredMotivos) return;
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS hc_motivos (
+       id INT AUTO_INCREMENT PRIMARY KEY, empresa_id INT NOT NULL, servicio_id INT NOT NULL,
+       nombre VARCHAR(120) NOT NULL, descripcion VARCHAR(255) DEFAULT NULL,
+       tipo VARCHAR(20) NOT NULL DEFAULT 'sesion', precio DECIMAL(10,2) NOT NULL DEFAULT 0,
+       duracion_min INT NOT NULL DEFAULT 45, consume_saldo TINYINT(1) NOT NULL DEFAULT 1,
+       orden INT NOT NULL DEFAULT 0, activo TINYINT(1) NOT NULL DEFAULT 1,
+       user_crea_id INT DEFAULT NULL,
+       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+       CONSTRAINT fk_hcmot_empresa  FOREIGN KEY (empresa_id)  REFERENCES empresas(id)     ON DELETE CASCADE,
+       CONSTRAINT fk_hcmot_servicio FOREIGN KEY (servicio_id) REFERENCES hc_servicios(id) ON DELETE CASCADE,
+       UNIQUE KEY uq_hcmot (empresa_id, servicio_id, nombre),
+       INDEX idx_hcmot_servicio (servicio_id)
+     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+  );
+  for (const tabla of ['hc_citas', 'hc_venta_items']) {
+    const [cols] = await pool().query<any[]>(
+      `SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'motivo_id' LIMIT 1`,
+      [tabla],
+    );
+    if (!(cols as any[]).length) await pool().query(`ALTER TABLE ${tabla} ADD COLUMN motivo_id INT NULL`);
+  }
+  _ensuredMotivos = true;
+}
+
 /** tenant_slug -> empresa_id (tenant). Igual criterio que el resto del sistema. */
 async function getEmpresaId(tenantSlug: string): Promise<number> {
   const [rows] = await pool().query<any[]>(
@@ -202,15 +235,17 @@ export interface CitaDto {
   paciente_id: number;
   terapeuta_id: number;
   servicio_id?: number | null;
+  motivo_id?: number | null;     // motivo de cita del catálogo (define precio/duración y saldo)
   inicio: string;         // 'YYYY-MM-DD HH:mm:ss'
   fin?: string | null;
-  motivo?: string | null;
+  motivo?: string | null;        // nota libre (respaldo/observación)
   estado_id?: number;
 }
 export interface CitaUpdateDto {
   inicio?: string;
   fin?: string | null;
   motivo?: string | null;
+  motivo_id?: number | null;
   estado_id?: number;
   terapeuta_id?: number;
   servicio_id?: number | null;
@@ -221,6 +256,20 @@ export interface ServicioDto {
   descripcion?: string | null;
   precio?: number | null;
   duracion_min?: number | null;   // duración de la sesión en minutos (para autocalcular la hora fin de la cita)
+  activo?: boolean;
+}
+
+/** Motivo de cita: un "tipo" dentro de un servicio (Evaluación, Sesión individual, Informe…),
+ *  con su propio precio y duración. Reemplaza el texto libre del motivo de la cita. */
+export interface MotivoDto {
+  servicio_id?: number;
+  nombre?: string;
+  descripcion?: string | null;
+  tipo?: string;                  // sesion|evaluacion|informe|grupal|otro
+  precio?: number | null;
+  duracion_min?: number | null;
+  consume_saldo?: boolean;        // ¿una cita de este motivo descuenta saldo de sesiones?
+  orden?: number | null;
   activo?: boolean;
 }
 
@@ -671,6 +720,84 @@ export const historiasRepo = {
     return rows[0];
   },
 
+  // ── Motivos de cita (tipos con precio, por servicio) ──────────────────────────
+  _selMotivo: `SELECT m.id, m.servicio_id, s.nombre AS servicio_nombre, m.nombre, m.descripcion,
+                      m.tipo, m.precio, m.duracion_min, m.consume_saldo, m.orden, m.activo
+                 FROM hc_motivos m JOIN hc_servicios s ON s.id = m.servicio_id`,
+
+  async listMotivos(tenantSlug: string, servicioId?: number, incluirInactivos = false) {
+    await ensureMotivos();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const params: any[] = [empresaId];
+    let filtro = '';
+    if (servicioId) { filtro += ' AND m.servicio_id = ?'; params.push(servicioId); }
+    if (!incluirInactivos) filtro += ' AND m.activo = 1';
+    const [rows] = await pool().query<any[]>(
+      `${this._selMotivo} WHERE m.empresa_id = ?${filtro} ORDER BY s.nombre, m.orden, m.nombre`,
+      params,
+    );
+    return rows;
+  },
+
+  async _getMotivo(id: number) {
+    const [rows] = await pool().query<any[]>(`${this._selMotivo} WHERE m.id = ?`, [id]);
+    return rows[0];
+  },
+
+  async createMotivo(tenantSlug: string, dto: MotivoDto, userId?: number) {
+    if (!dto.nombre?.trim()) throw new AppError('El nombre del motivo es requerido', 400);
+    if (!dto.servicio_id) throw new AppError('El servicio del motivo es requerido', 400);
+    await ensureMotivos();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const dur = dto.duracion_min != null && Number(dto.duracion_min) > 0 ? Math.round(Number(dto.duracion_min)) : 45;
+    const [res] = await pool().query<any>(
+      `INSERT INTO hc_motivos (empresa_id, servicio_id, nombre, descripcion, tipo, precio, duracion_min, consume_saldo, orden, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, Number(dto.servicio_id), dto.nombre.trim(), dto.descripcion || null,
+       dto.tipo || 'sesion', Number(dto.precio) || 0, dur, dto.consume_saldo === false ? 0 : 1,
+       Number(dto.orden) || 0, userId ?? null],
+    );
+    return this._getMotivo(res.insertId);
+  },
+
+  async updateMotivo(tenantSlug: string, id: number, dto: MotivoDto) {
+    await ensureMotivos();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const campos: string[] = [];
+    const vals: any[] = [];
+    const set = (c: string, v: any) => { campos.push(`${c} = ?`); vals.push(v); };
+    if (dto.nombre !== undefined)        set('nombre', dto.nombre.trim());
+    if (dto.descripcion !== undefined)   set('descripcion', dto.descripcion || null);
+    if (dto.tipo !== undefined)          set('tipo', dto.tipo || 'sesion');
+    if (dto.precio !== undefined)        set('precio', Number(dto.precio) || 0);
+    if (dto.duracion_min !== undefined)  set('duracion_min', Number(dto.duracion_min) > 0 ? Math.round(Number(dto.duracion_min)) : 45);
+    if (dto.consume_saldo !== undefined) set('consume_saldo', dto.consume_saldo ? 1 : 0);
+    if (dto.orden !== undefined)         set('orden', Number(dto.orden) || 0);
+    if (dto.activo !== undefined)        set('activo', dto.activo ? 1 : 0);
+    if (!campos.length) return null;
+    vals.push(empresaId, id);
+    const [res] = await pool().query<any>(`UPDATE hc_motivos SET ${campos.join(', ')} WHERE empresa_id = ? AND id = ?`, vals);
+    if (!res.affectedRows) return null;
+    return this._getMotivo(id);
+  },
+
+  /** Borra el motivo; si ya se usó en citas o ventas lo DESACTIVA (preserva historial). */
+  async deleteMotivo(tenantSlug: string, id: number) {
+    await ensureMotivos();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [[uso]] = await pool().query<any[]>(
+      `SELECT (SELECT COUNT(*) FROM hc_citas WHERE motivo_id = ?) +
+              (SELECT COUNT(*) FROM hc_venta_items WHERE motivo_id = ?) AS n`,
+      [id, id],
+    ) as any;
+    if (Number(uso?.n) > 0) {
+      await pool().query('UPDATE hc_motivos SET activo = 0 WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+      return { modo: 'desactivado' as const };
+    }
+    await pool().query('DELETE FROM hc_motivos WHERE empresa_id = ? AND id = ?', [empresaId, id]);
+    return { modo: 'eliminado' as const };
+  },
+
   // ── Servicios que brinda cada terapeuta ───────────────────────────────────────
   async getServiciosDeTerapeuta(tenantSlug: string, terapeutaId: number) {
     const empresaId = await getEmpresaId(tenantSlug);
@@ -788,11 +915,13 @@ export const historiasRepo = {
               DATE_FORMAT(c.inicio, '%Y-%m-%dT%H:%i:%s') AS inicio,
               DATE_FORMAT(c.fin,    '%Y-%m-%dT%H:%i:%s') AS fin,
               e.nombre AS estado_nombre, s.nombre AS servicio_nombre,
+              mo.nombre AS motivo_nombre, mo.duracion_min AS motivo_duracion,
               CONCAT(p.nombres, ' ', p.apellidos) AS paciente_nombre,
               CONCAT(u.nombres, ' ', u.apellidos) AS terapeuta_nombre
          FROM hc_citas c
          LEFT JOIN hc_cita_estado e ON e.id = c.estado_id
          LEFT JOIN hc_servicios s   ON s.id = c.servicio_id
+         LEFT JOIN hc_motivos mo    ON mo.id = c.motivo_id
          JOIN hc_pacientes p ON p.id = c.paciente_id
          JOIN usuarios u     ON u.id = c.terapeuta_id
         WHERE ${where.join(' AND ')}
@@ -828,20 +957,64 @@ export const historiasRepo = {
     return { comprado, consumido, saldo: comprado - consumido };
   },
 
-  /** Saldo de sesiones para el frontend (incluye `requiere`: si el vínculo venta↔cita aplica). */
-  async saldoSesiones(tenantSlug: string, pacienteId: number, servicioId: number) {
+  /** Saldo de sesiones de un MOTIVO para un paciente: compradas (ventas emitidas de ese
+   *  motivo, incluidas las líneas que salieron de un paquete) menos usadas (citas de ese
+   *  motivo no canceladas). Es la versión fina del saldo (antes era por servicio). */
+  async _saldoSesionesMotivo(empresaId: number, pacienteId: number, motivoId: number, excluirCitaId?: number) {
+    const [[compra]] = await pool().query<any[]>(
+      `SELECT COALESCE(SUM(vi.cantidad), 0) AS comprado
+         FROM hc_venta_items vi
+         JOIN hc_ventas v ON v.id = vi.venta_id
+        WHERE vi.empresa_id = ? AND v.paciente_id = ? AND v.estado = 'emitida'
+          AND vi.motivo_id = ?`,
+      [empresaId, pacienteId, motivoId],
+    ) as any;
+    const params: any[] = [empresaId, pacienteId, motivoId];
+    let excl = '';
+    if (excluirCitaId) { excl = 'AND id <> ?'; params.push(excluirCitaId); }
+    const [[uso]] = await pool().query<any[]>(
+      `SELECT COUNT(*) AS consumido FROM hc_citas
+        WHERE empresa_id = ? AND paciente_id = ? AND motivo_id = ? AND estado_id <> 3 ${excl}`,
+      params,
+    ) as any;
+    const comprado = Number(compra?.comprado) || 0;
+    const consumido = Number(uso?.consumido) || 0;
+    return { comprado, consumido, saldo: comprado - consumido };
+  },
+
+  /** Saldo de sesiones para el frontend (incluye `requiere`: si el vínculo venta↔cita aplica).
+   *  Prefiere el saldo por MOTIVO; si no se pasa motivo, cae al saldo por servicio (legacy). */
+  async saldoSesiones(tenantSlug: string, pacienteId: number, servicioId?: number, motivoId?: number) {
     const empresaId = await getEmpresaId(tenantSlug);
     const mods = await finanzasRepo.getModulosByEmpresaId(empresaId);
     const requiere = !!(mods.ventas && mods.agenda);
-    const s = await this._saldoSesiones(empresaId, pacienteId, servicioId);
+    const s = motivoId
+      ? await this._saldoSesionesMotivo(empresaId, pacienteId, motivoId)
+      : await this._saldoSesiones(empresaId, pacienteId, servicioId!);
     return { ...s, requiere };
   },
 
-  /** Regla de negocio: con Ventas + Agenda activos, para agendar una cita de un servicio
-   *  el paciente debe tener saldo de sesiones (una venta emitida de ese servicio). */
-  async _verificarSaldoParaCita(empresaId: number, pacienteId: number, servicioId: number, excluirCitaId?: number) {
+  /** Regla de negocio: con Ventas + Agenda activos, para agendar una cita el paciente debe
+   *  tener saldo. Usa el saldo por MOTIVO si la cita trae motivo; si no, el de servicio (legacy).
+   *  Un motivo con `consume_saldo = 0` (evaluación/informe suelto) NO exige saldo. */
+  async _verificarSaldoParaCita(empresaId: number, pacienteId: number, servicioId?: number, motivoId?: number, excluirCitaId?: number) {
     const mods = await finanzasRepo.getModulosByEmpresaId(empresaId);
     if (!(mods.ventas && mods.agenda)) return;   // solo aplica con ambos módulos activos
+    if (motivoId) {
+      const [[m]] = await pool().query<any[]>('SELECT consume_saldo FROM hc_motivos WHERE empresa_id = ? AND id = ? LIMIT 1', [empresaId, motivoId]) as any;
+      if (m && Number(m.consume_saldo) === 0) return;   // este motivo no descuenta saldo
+      const { comprado, consumido, saldo } = await this._saldoSesionesMotivo(empresaId, pacienteId, motivoId, excluirCitaId);
+      if (saldo < 1) {
+        throw new AppError(
+          comprado === 0
+            ? 'Este paciente no tiene una venta de este motivo. Registra la venta (o el paquete) antes de agendar la cita.'
+            : `Sin sesiones disponibles de este motivo (compradas ${comprado}, usadas ${consumido}). Registra una nueva venta para seguir agendando.`,
+          409,
+        );
+      }
+      return;
+    }
+    if (!servicioId) return;
     const { comprado, consumido, saldo } = await this._saldoSesiones(empresaId, pacienteId, servicioId, excluirCitaId);
     if (saldo < 1) {
       throw new AppError(
@@ -858,12 +1031,15 @@ export const historiasRepo = {
       throw new AppError('Paciente, terapeuta y fecha/hora de inicio son requeridos', 400);
     }
     const empresaId = await getEmpresaId(tenantSlug);
-    // Vínculo venta↔cita: si la cita lleva servicio, exige saldo de sesiones (regla de negocio).
-    if (dto.servicio_id) await this._verificarSaldoParaCita(empresaId, dto.paciente_id, dto.servicio_id);
+    await ensureMotivos();
+    // Vínculo venta↔cita: si la cita lleva motivo (o servicio), exige saldo de sesiones.
+    if (dto.motivo_id || dto.servicio_id) {
+      await this._verificarSaldoParaCita(empresaId, dto.paciente_id, dto.servicio_id ?? undefined, dto.motivo_id ?? undefined);
+    }
     const [res] = await pool().query<any>(
-      `INSERT INTO hc_citas (empresa_id, paciente_id, terapeuta_id, servicio_id, inicio, fin, estado_id, motivo, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [empresaId, dto.paciente_id, dto.terapeuta_id, dto.servicio_id || null, dto.inicio, dto.fin || null,
+      `INSERT INTO hc_citas (empresa_id, paciente_id, terapeuta_id, servicio_id, motivo_id, inicio, fin, estado_id, motivo, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [empresaId, dto.paciente_id, dto.terapeuta_id, dto.servicio_id || null, dto.motivo_id || null, dto.inicio, dto.fin || null,
        dto.estado_id || 1, dto.motivo || null, userId ?? null],
     );
     return (await this.listCitasById(empresaId, res.insertId))[0];
@@ -871,13 +1047,18 @@ export const historiasRepo = {
 
   async updateCita(tenantSlug: string, id: number, dto: CitaUpdateDto, userId?: number) {
     const empresaId = await getEmpresaId(tenantSlug);
-    // Si se cambia el servicio de la cita a otro, ese nuevo servicio debe tener saldo.
-    if (dto.servicio_id) {
+    await ensureMotivos();
+    // Si se cambia el motivo (o servicio) de la cita a otro, ese nuevo debe tener saldo.
+    if (dto.motivo_id || dto.servicio_id) {
       const [[cur]] = await pool().query<any[]>(
-        'SELECT paciente_id, servicio_id FROM hc_citas WHERE empresa_id = ? AND id = ? LIMIT 1', [empresaId, id],
+        'SELECT paciente_id, servicio_id, motivo_id FROM hc_citas WHERE empresa_id = ? AND id = ? LIMIT 1', [empresaId, id],
       ) as any;
-      if (cur && Number(cur.servicio_id) !== Number(dto.servicio_id)) {
-        await this._verificarSaldoParaCita(empresaId, cur.paciente_id, Number(dto.servicio_id), id);
+      if (cur) {
+        const cambiaMotivo   = dto.motivo_id   && Number(cur.motivo_id)   !== Number(dto.motivo_id);
+        const cambiaServicio = dto.servicio_id && Number(cur.servicio_id) !== Number(dto.servicio_id);
+        if (cambiaMotivo || (cambiaServicio && !dto.motivo_id && !cur.motivo_id)) {
+          await this._verificarSaldoParaCita(empresaId, cur.paciente_id, dto.servicio_id ?? undefined, dto.motivo_id ?? undefined, id);
+        }
       }
     }
     const campos: string[] = [];
@@ -886,6 +1067,7 @@ export const historiasRepo = {
     if (dto.inicio !== undefined)       set('inicio', dto.inicio);
     if (dto.fin !== undefined)          set('fin', dto.fin || null);
     if (dto.motivo !== undefined)       set('motivo', dto.motivo || null);
+    if (dto.motivo_id !== undefined)    set('motivo_id', dto.motivo_id || null);
     if (dto.estado_id !== undefined)    set('estado_id', dto.estado_id);
     if (dto.terapeuta_id !== undefined) set('terapeuta_id', dto.terapeuta_id);
     if (dto.servicio_id !== undefined)  set('servicio_id', dto.servicio_id || null);
@@ -914,11 +1096,13 @@ export const historiasRepo = {
               DATE_FORMAT(c.inicio, '%Y-%m-%dT%H:%i:%s') AS inicio,
               DATE_FORMAT(c.fin,    '%Y-%m-%dT%H:%i:%s') AS fin,
               e.nombre AS estado_nombre, s.nombre AS servicio_nombre,
+              mo.nombre AS motivo_nombre, mo.duracion_min AS motivo_duracion,
               CONCAT(p.nombres, ' ', p.apellidos) AS paciente_nombre,
               CONCAT(u.nombres, ' ', u.apellidos) AS terapeuta_nombre
          FROM hc_citas c
          LEFT JOIN hc_cita_estado e ON e.id = c.estado_id
          LEFT JOIN hc_servicios s   ON s.id = c.servicio_id
+         LEFT JOIN hc_motivos mo    ON mo.id = c.motivo_id
          JOIN hc_pacientes p ON p.id = c.paciente_id
          JOIN usuarios u     ON u.id = c.terapeuta_id
         WHERE c.empresa_id = ? AND c.id = ? LIMIT 1`,
