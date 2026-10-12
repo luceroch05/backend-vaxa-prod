@@ -125,12 +125,12 @@ export async function descargarZipGrupo(
 
   const grupoId = Number(req.params.grupoId);
 
-  const zipBuffer = await emisionService.zipGrupo(
+  const rows = await emisionService.zipGrupo(
     tid(req),
     grupoId,
   );
 
-  if (!zipBuffer) {
+  if (!rows) {
     res.status(404).json({
       error: 'No existen certificados para este grupo',
     });
@@ -144,21 +144,23 @@ export async function descargarZipGrupo(
     `attachment; filename="grupo-${grupoId}.zip"`,
   );
 
-  res.send(zipBuffer);
+  // Se transmite el ZIP directo a la respuesta (sin armarlo entero en memoria).
+  await emisionService.streamZip(rows, res);
 }
 
 /** Descarga en ZIP los certificados de una lista de IDs (lo que el panel tenga filtrado). */
 export async function descargarZipPorIds(req: Request, res: Response): Promise<void> {
   const ids: number[] = Array.isArray(req.body?.ids) ? req.body.ids : [];
 
-  const zipBuffer = await emisionService.zipPorIds(tid(req), ids);
+  const rows = await emisionService.zipPorIds(tid(req), ids);
 
-  if (!zipBuffer) {
+  if (!rows) {
     res.status(404).json({ error: 'No hay certificados para descargar' });
     return;
   }
 
   res.setHeader('Content-Type', 'application/zip');
   res.setHeader('Content-Disposition', 'attachment; filename="certificados.zip"');
-  res.send(zipBuffer);
+  // Se transmite el ZIP directo a la respuesta (sin armarlo entero en memoria).
+  await emisionService.streamZip(rows, res);
 }

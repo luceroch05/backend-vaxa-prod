@@ -73,6 +73,32 @@ async function ensureLayoutBase(): Promise<void> {
     await pool().query(`ALTER TABLE empresas ADD COLUMN layout_base TEXT NULL`);
   }
   _ensuredLayoutBase = true;
+
+  // Migración AUTOMÁTICA (una sola vez por arranque): si quedaron diseños viejos con
+  // imágenes en base64 embebidas en el JSON, se sacan a archivo en /uploads y en la BD
+  // queda solo la ruta. Regla del proyecto: imágenes como archivo, nunca base64 en la BD.
+  // Blindado: si algo falla no bloquea el arranque ni el resto de la app.
+  try {
+    const [filas] = await pool().query<any[]>(
+      `SELECT id, layout_base FROM empresas
+        WHERE layout_base IS NOT NULL AND layout_base LIKE '%data:image%'`,
+    );
+    let migradas = 0;
+    for (const f of filas as any[]) {
+      try {
+        const limpio = JSON.stringify(externalizarBase64(JSON.parse(f.layout_base), 'personalizado'));
+        if (limpio !== f.layout_base) {
+          await pool().query(`UPDATE empresas SET layout_base = ? WHERE id = ?`, [limpio, f.id]);
+          migradas++;
+        }
+      } catch (e) {
+        console.warn(`[layout_base] No se pudo migrar empresa ${f.id}:`, (e as Error).message);
+      }
+    }
+    if (migradas > 0) console.log(`[layout_base] Migradas ${migradas} empresa(s): base64 → archivo.`);
+  } catch (e) {
+    console.warn('[layout_base] Migración automática omitida:', (e as Error).message);
+  }
 }
 
 /**
@@ -95,7 +121,6 @@ async function ensureLogoCert(): Promise<void> {
   _ensuredLogoCert = true;
 }
 import archiver = require('archiver');
-import { PassThrough } from 'stream';
 // ============================================================
 // CATALOGOS
 // ============================================================
@@ -1758,7 +1783,17 @@ export const configRepo = {
   async saveLayoutBase(tenantSlug: string, layoutJson: string | null, userId?: number): Promise<void> {
     await ensureLayoutBase();
     const empresaId = await getEmpresaId(tenantSlug);
-    await pool().query(`UPDATE empresas SET layout_base = ? WHERE id = ?`, [layoutJson ?? null, empresaId]);
+    // Regla del proyecto: NADA de imágenes en base64 dentro de la BD. Si el JSON del
+    // diseño trae alguna imagen embebida (p.ej. el fondo), se extrae a archivo en
+    // /uploads y en el JSON queda solo la ruta. Esto además evita el error
+    // "Data too long for column 'layout_base'" (la columna no aguanta un base64).
+    let jsonLimpio = layoutJson;
+    if (layoutJson) {
+      try {
+        jsonLimpio = JSON.stringify(externalizarBase64(JSON.parse(layoutJson), 'personalizado'));
+      } catch { /* no es JSON válido → se guarda tal cual */ }
+    }
+    await pool().query(`UPDATE empresas SET layout_base = ? WHERE id = ?`, [jsonLimpio ?? null, empresaId]);
     auditoriaRepo.registrar({
       empresaId, usuarioId: userId, accion: 'editar', entidad: 'config', entidadId: empresaId, entidadNombre: null,
       descripcion: layoutJson
@@ -1958,14 +1993,19 @@ export const emisionRepo = {
       conn.release();
     }
 
-    // Fuera de la transacción: cargar datos + generar PDFs en background.
-    for (const certId of emitidosIds) {
-      const cert = await emisionRepo._cargarCertCompleto(certId);
-      if (!nombreAula) nombreAula = cert?.nombre_grupo ?? null;
-      if (cert) setImmediate(() => generarPdfYGuardar(cert, tenantSlug).catch(err =>
-        console.error(`[PDF] Error generando ${cert.codigo_unico}:`, err.message),
-      ));
+    // nombreAula para la auditoría: lo tomamos del primer certificado emitido.
+    if (emitidosIds.length > 0) {
+      const primero = await emisionRepo._cargarCertCompleto(emitidosIds[0]);
+      nombreAula = primero?.nombre_grupo ?? null;
     }
+
+    // Generación de PDFs en BACKGROUND con concurrencia ACOTADA (máx. 3 a la vez).
+    // Antes se disparaban TODOS a la vez (un setImmediate por certificado): con aulas
+    // grandes eso cargaba cientos de fondos/logos en memoria al mismo tiempo y reventaba
+    // la RAM del servidor (OOM killer). Procesarlos de a pocos mantiene el uso de memoria
+    // plano SIN afectar la velocidad percibida: la API ya respondió y los PDFs se siguen
+    // generando solos en segundo plano, igual que antes.
+    void generarPdfsEnLote(emitidosIds, tenantSlug);
 
     // Auditoría: una sola entrada por la tanda.
     if (emitidosIds.length > 0) {
@@ -2169,15 +2209,24 @@ export const emisionRepo = {
     }
   },
 
+  /** Empaqueta y transmite en ZIP (streaming) los certificados dados, volcándolos en
+   *  `dest` (el `res` de Express). No acumula el ZIP en memoria. */
+  streamZip(rows: any[], dest: NodeJS.WritableStream): Promise<void> {
+    return streamCertsZip(rows, dest);
+  },
+
+  /** Filas {url, codigo_unico, participante_nombre} de los certificados activos de un
+   *  grupo, listas para empaquetar en ZIP. null si no hay ninguno. */
   async zipGrupo(
   tenantSlug: string,
   grupoId: number,
-): Promise<Buffer | null> {
+): Promise<any[] | null> {
 
   const empresaId = await getEmpresaId(tenantSlug);
 
   const [rows] = await pool().query<any[]>(
     `SELECT
+        c.id,
         c.url,
         c.codigo_unico,
         CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre
@@ -2188,13 +2237,13 @@ export const emisionRepo = {
         ON p.id = i.participante_id
      WHERE i.grupo_id = ?
        AND c.empresa_id = ?
-       AND c.estado_id = 1
-       AND c.url IS NOT NULL`,
+       AND c.estado_id = 1`,
     [grupoId, empresaId],
   );
 
   if (!rows.length) return null;
-  return zipearCerts(rows);
+  await asegurarPdfsExisten(rows, tenantSlug);
+  return rows;
 },
 
 /**
@@ -2202,7 +2251,7 @@ export const emisionRepo = {
  * sirve para descargar exactamente lo que el panel tenga filtrado
  * (por grupo, por nombre/documento, o cualquier combinación).
  */
-async zipPorIds(tenantSlug: string, ids: number[]): Promise<Buffer | null> {
+async zipPorIds(tenantSlug: string, ids: number[]): Promise<any[] | null> {
   const idsLimpios = (ids ?? []).map(Number).filter(n => Number.isInteger(n) && n > 0);
   if (!idsLimpios.length) return null;
 
@@ -2210,37 +2259,39 @@ async zipPorIds(tenantSlug: string, ids: number[]): Promise<Buffer | null> {
   const placeholders = idsLimpios.map(() => '?').join(',');
 
   const [rows] = await pool().query<any[]>(
-    `SELECT c.url, c.codigo_unico,
+    `SELECT c.id, c.url, c.codigo_unico,
             CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre
      FROM certificados c
      INNER JOIN inscripciones i ON i.id = c.inscripcion_id
      INNER JOIN participantes p ON p.id = i.participante_id
      WHERE c.id IN (${placeholders})
        AND c.empresa_id = ?
-       AND c.estado_id = 1
-       AND c.url IS NOT NULL`,
+       AND c.estado_id = 1`,
     [...idsLimpios, empresaId],
   );
 
   if (!rows.length) return null;
-  return zipearCerts(rows);
+  await asegurarPdfsExisten(rows, tenantSlug);
+  return rows;
 },
 
 };
 
-/* ── Helper: arma un ZIP en memoria a partir de filas {url, participante_nombre} ── */
-function zipearCerts(rows: any[]): Promise<Buffer | null> {
+/* ── Helper: transmite un ZIP (streaming) a partir de filas {url, participante_nombre} ──
+ * Vuelca el ZIP directo al stream `dest` (normalmente el `res` de Express) en vez de
+ * acumularlo entero en memoria. Antes se juntaban todos los PDFs + el ZIP comprimido en
+ * un solo Buffer (Buffer.concat), lo que con grupos grandes disparaba la RAM. Así el
+ * archivo fluye al navegador a medida que se arma: memoria plana y la descarga arranca
+ * antes (misma o mejor experiencia para el usuario). */
+function streamCertsZip(rows: any[], dest: NodeJS.WritableStream): Promise<void> {
   return new Promise((resolve, reject) => {
     // archiver v8 es ESM y cambió la API: ya no es archiver('zip', …) sino la clase ZipArchive.
     const archive = new (archiver as any).ZipArchive({ zlib: { level: 9 } });
 
-    const stream = new PassThrough();
-    const chunks: Buffer[] = [];
-    stream.on('data', (chunk) => chunks.push(chunk));
-    stream.on('end', () => resolve(Buffer.concat(chunks)));
-    stream.on('error', reject);
     archive.on('error', reject);
-    archive.pipe(stream);
+    dest.on('error', reject);
+    dest.on('finish', () => resolve());
+    archive.pipe(dest);
 
     // Evita nombres repetidos en el ZIP (dos alumnos con el mismo nombre).
     const usados = new Map<string, number>();
@@ -2459,6 +2510,83 @@ if (!acta && cert.programa_id) {
       })),
       acta,
     };
+}
+
+/**
+ * Genera los PDFs de una tanda en SEGUNDO PLANO con concurrencia acotada.
+ * Procesa `certIds` con un pool de `concurrencia` trabajadores, de modo que como
+ * máximo se generan `concurrencia` PDFs a la vez (cada uno carga su fondo/logos en
+ * memoria). Esto evita el pico de RAM que, con aulas grandes, tumbaba el servidor
+ * por OOM. No se hace `await` de esta función: la emisión ya respondió al cliente.
+ */
+async function generarPdfsEnLote(certIds: number[], tenantSlug: string, concurrencia = 3): Promise<void> {
+  let i = 0;
+  const worker = async (): Promise<void> => {
+    while (i < certIds.length) {
+      const certId = certIds[i++];
+      try {
+        const cert = await emisionRepo._cargarCertCompleto(certId);
+        if (cert) await generarPdfYGuardar(cert, tenantSlug);
+      } catch (err) {
+        console.error(`[PDF] Error generando certificado ${certId}:`, (err as Error).message);
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrencia, certIds.length) }, () => worker()),
+  );
+}
+
+/**
+ * Recorre en profundidad un objeto/array (el JSON de un diseño) y reemplaza CUALQUIER
+ * imagen en base64 (`data:image/...;base64,...`) por la ruta del archivo guardado en
+ * /uploads. Regla del proyecto: las imágenes van como archivo en el servidor, NUNCA
+ * base64 en la base de datos. `guardarImagen` ya es idempotente: si el valor ya es una
+ * ruta/URL, lo deja igual.
+ */
+function externalizarBase64(valor: any, subcarpeta: string): any {
+  if (typeof valor === 'string') {
+    return valor.startsWith('data:image') ? (guardarImagen(valor, subcarpeta) ?? valor) : valor;
+  }
+  if (Array.isArray(valor)) return valor.map((v) => externalizarBase64(v, subcarpeta));
+  if (valor && typeof valor === 'object') {
+    for (const k of Object.keys(valor)) valor[k] = externalizarBase64(valor[k], subcarpeta);
+    return valor;
+  }
+  return valor;
+}
+
+/**
+ * Antes de empaquetar un ZIP, garantiza que cada certificado tenga su PDF en disco.
+ * Si falta (nunca se generó → `url` vacía, o el archivo físico no existe), lo regenera
+ * al vuelo y actualiza la `url` en memoria para que entre al ZIP. Con concurrencia
+ * acotada para no inflar la RAM. Esto repara las tandas que se quedaron a medias (p.ej.
+ * las que murieron por OOM): así el ZIP siempre baja COMPLETO, no solo los que
+ * alcanzaron a generarse.
+ */
+async function asegurarPdfsExisten(rows: any[], tenantSlug: string, concurrencia = 3): Promise<void> {
+  const faltantes = rows.filter((r) => {
+    if (!r.url) return true;
+    const abs = path.join(process.cwd(), String(r.url).replace(/^\/+/, ''));
+    return !fs.existsSync(abs);
+  });
+  if (faltantes.length === 0) return;
+
+  let i = 0;
+  const worker = async (): Promise<void> => {
+    while (i < faltantes.length) {
+      const row = faltantes[i++];
+      try {
+        const url = await emisionRepo.regenerarPDF(tenantSlug, row.id);
+        if (url) row.url = `/${url}`;
+      } catch (err) {
+        console.error(`[ZIP] No se pudo regenerar el PDF del certificado ${row.id}:`, (err as Error).message);
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(concurrencia, faltantes.length) }, () => worker()),
+  );
 }
 
 /** Genera el PDF del certificado y guarda su URL en BD. */

@@ -11,4 +11,5 @@ export const emisionService = {
   preview:       (tenantSlug: string, inscripcionId: number)               => emisionRepo.previewBuffer(tenantSlug, inscripcionId),
   zipGrupo: (tenantSlug: string, grupoId: number) =>emisionRepo.zipGrupo(tenantSlug, grupoId),
   zipPorIds: (tenantSlug: string, ids: number[]) => emisionRepo.zipPorIds(tenantSlug, ids),
+  streamZip: (rows: any[], dest: NodeJS.WritableStream) => emisionRepo.streamZip(rows, dest),
 };
