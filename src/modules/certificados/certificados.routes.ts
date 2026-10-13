@@ -3,6 +3,7 @@ import { w } from './shared/router.helper';
 
 import { getCatalogos }                                              from './catalogos/catalogo.controller';
 import { listCalidades, createCalidad, updateCalidad }               from './calidades/calidad.controller';
+import { listGrados, createGrado }                                   from './grados/grado.controller';
 import { listProgramas, getPrograma, createPrograma, updatePrograma, setActivoPrograma, eliminarPrograma } from './programas/programa.controller';
 import { listGrupos, getGrupo, createGrupo, updateGrupo, setActivoGrupo, eliminarGrupo } from './grupos/grupo.controller';
 import { listParticipantes, getParticipante, createParticipante, buscarParticipante, setActivoParticipante, eliminarParticipante, actualizarParticipante } from './participantes/participante.controller';
@@ -28,6 +29,10 @@ router.get('/catalogos',                        w(getCatalogos));
 router.get('/calidades',                        w(listCalidades));
 router.post('/calidades',                       w(createCalidad));
 router.patch('/calidades/:id',                  w(updateCalidad));
+
+// Grados académicos EXTRA (catálogo por empresa; chips para TODOS los usuarios)
+router.get('/grados',                           w(listGrados));
+router.post('/grados',                          w(createGrado));
 
 // Programas
 router.get('/programas',                        w(listProgramas));

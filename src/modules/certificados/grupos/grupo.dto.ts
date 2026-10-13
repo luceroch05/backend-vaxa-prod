@@ -9,6 +9,8 @@ export interface CreateGrupoDto {
   dias_semana?: string | null;  // días en ISO 1=Lun..7=Dom, separados por coma. Ej: "1,3,5"
   hora_inicio?: string | null;  // "HH:MM"
   hora_fin?: string | null;     // "HH:MM"
+  /** Override de evaluación por aula: null = hereda del programa, 1 = con notas, 0 = sin notas. */
+  requiere_notas?: number | null;
 }
 
 export type UpdateGrupoDto = Partial<CreateGrupoDto>;

@@ -13,6 +13,8 @@ export class GrupoEntity {
   hora_fin?: string | null;
   modalidad_id!: number;
   modalidad_nombre?: string;
+  /** Override de evaluación por aula: null = hereda del programa, 1 = con notas, 0 = sin notas. */
+  requiere_notas?: number | null;
   activo!: boolean;
   created_at!: string;
   static fromRow(row: any) { return Object.assign(new GrupoEntity(), row); }

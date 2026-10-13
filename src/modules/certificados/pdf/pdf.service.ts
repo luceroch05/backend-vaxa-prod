@@ -76,6 +76,15 @@ export interface PdfActaDatos {
   unidad_label:        string;
   /** Modo créditos: la tabla muestra créditos por unidad + total, no notas. */
   es_creditos?:        boolean;
+  /** Modo temario: la tabla muestra solo la lista de temas (sin notas ni promedio). */
+  es_temario?:         boolean;
+  /** Config del acta (desde la plantilla): título propio, qué datos muestra y texto extra. */
+  titulo_override?:    string | null;
+  mostrar_documento?:  boolean;
+  mostrar_grupo?:      boolean;
+  mostrar_periodo?:    boolean;
+  mostrar_qr?:         boolean;
+  texto_extra?:        string | null;
   total_creditos?:     number;
   nota_minima:         number;
   fecha_inicio?:       string;
@@ -181,11 +190,16 @@ function pintarActa(doc: any, datos: PdfActaDatos, qrDataUrl?: string, codigo?: 
 
   const NAVY = '#12294d';
   const esCreditos = !!datos.es_creditos;
+  const esTemario  = !!datos.es_temario;
+
+  // Título: el de la plantilla (titulo_override) si lo pusieron; si no, el automático según el modo.
+  const tituloAuto = esTemario ? 'TEMARIO DEL PROGRAMA' : esCreditos ? 'ACTA DE CRÉDITOS' : 'ACTA DE NOTAS';
+  const tituloActa = (datos.titulo_override && datos.titulo_override.trim()) ? datos.titulo_override.trim() : tituloAuto;
 
   // ── TÍTULO ────────────────────────────────────────────────
   doc.font('Helvetica-Bold').fontSize(26 * PX)  // 26px → 19.5pt
      .fillColor(NAVY)
-     .text(esCreditos ? 'ACTA DE CRÉDITOS' : 'ACTA DE NOTAS', left, top,
+     .text(tituloActa, left, top,
            { width: contentW, align: 'center', characterSpacing: 0.5 });
 
   // Línea divisoria
@@ -196,9 +210,10 @@ function pintarActa(doc: any, datos: PdfActaDatos, qrDataUrl?: string, codigo?: 
   // ── BLOQUE DATOS + QR ─────────────────────────────────────
   let y = lineY + 18 * PX;
 
-  // QR arriba-derecha (80px), alineado al bloque de datos y con margen hasta la tabla
+  // QR arriba-derecha (80px), alineado al bloque de datos y con margen hasta la tabla.
+  // Se puede ocultar desde la config del acta (mostrar_qr === false).
   const QR = 80 * PX;
-  const qrImg = qrDataUrl ? imagenABuffer(qrDataUrl) : null;
+  const qrImg = (datos.mostrar_qr !== false && qrDataUrl) ? imagenABuffer(qrDataUrl) : null;
   if (qrImg) {
     doc.image(qrImg.data, right - QR, y, { width: QR, height: QR });
     if (codigo) {
@@ -221,17 +236,19 @@ function pintarActa(doc: any, datos: PdfActaDatos, qrDataUrl?: string, codigo?: 
   };
   doc.y = y;   // posición determinística (igual que el preview de la config): info arranca en `y`
   info('Participante:', datos.participante_nombre);
-  info('Documento:',    datos.numero_documento);
+  if (datos.mostrar_documento !== false) info('Documento:', datos.numero_documento);
   info('Programa:',     datos.programa_nombre);
-  info('Grupo:',        datos.nombre_grupo);
-  info('Periodo:',      `${fmtFecha(datos.fecha_inicio)}${datos.fecha_inicio && datos.fecha_fin ? ' al ' : ''}${fmtFecha(datos.fecha_fin)}`);
-  // ↑ siempre se muestra, con '—' si vacío (igual que React)
+  if (datos.mostrar_grupo !== false) info('Grupo:', datos.nombre_grupo);
+  if (datos.mostrar_periodo !== false)
+    info('Periodo:', `${fmtFecha(datos.fecha_inicio)}${datos.fecha_inicio && datos.fecha_fin ? ' al ' : ''}${fmtFecha(datos.fecha_fin)}`);
+  // ↑ Documento/Grupo/Periodo se pueden ocultar desde la config del acta.
 
   // ── TABLA ─────────────────────────────────────────────────
   y = doc.y + 16 * PX;
 
   const colNum   = 60 * PX;
-  const colValor = 140 * PX;
+  // En modo temario no hay columna de valor (ni NOTA ni CRÉDITOS): la unidad ocupa todo.
+  const colValor = esTemario ? 0 : 140 * PX;
   const colUni   = contentW - colNum - colValor;
   const rowH     = 24;
 
@@ -241,8 +258,10 @@ function pintarActa(doc: any, datos: PdfActaDatos, qrDataUrl?: string, codigo?: 
   doc.text('N°',      left + 14 * PX,             y + 7, { width: colNum });
   doc.text(esCreditos ? 'TEMA' : datos.unidad_label.toUpperCase(),
            left + colNum + 14 * PX,                y + 7, { width: colUni - 28 * PX });
-  doc.text(esCreditos ? 'CRÉDITOS' : 'NOTA',
-           left + colNum + colUni,                 y + 7, { width: colValor - 14 * PX, align: 'right' });
+  if (!esTemario) {
+    doc.text(esCreditos ? 'CRÉDITOS' : 'NOTA',
+             left + colNum + colUni,                 y + 7, { width: colValor - 14 * PX, align: 'right' });
+  }
   y += rowH;
 
   const unidadesOrden = [...datos.unidades].sort((a, b) => a.orden - b.orden);
@@ -262,17 +281,21 @@ function pintarActa(doc: any, datos: PdfActaDatos, qrDataUrl?: string, codigo?: 
     doc.fillColor('#0f172a').font('Helvetica').fontSize(13 * PX)
        .text(nombre, left + colNum + 14 * PX, y + 8 * PX, { width: colUni - 28 * PX });
 
-    const valor = esCreditos
-      ? String(Number(u.creditos ?? 0))
-      : (u.nota == null ? '—' : u.nota.toFixed(2));
-    doc.font('Helvetica-Bold').fillColor('#0f172a')
-       .text(valor, left + colNum + colUni, y + 8 * PX,
-             { width: colValor - 14 * PX, align: 'right' });
+    if (!esTemario) {
+      const valor = esCreditos
+        ? String(Number(u.creditos ?? 0))
+        : (u.nota == null ? '—' : u.nota.toFixed(2));
+      doc.font('Helvetica-Bold').fillColor('#0f172a')
+         .text(valor, left + colNum + colUni, y + 8 * PX,
+               { width: colValor - 14 * PX, align: 'right' });
+    }
 
     y += rowHi;
   });
 
   // ── RESUMEN ───────────────────────────────────────────────
+  // El temario no tiene promedio ni condición: es solo la lista de temas.
+  if (!esTemario) {
   y += 18 * PX;
   if (esCreditos) {
     const totalCred = datos.total_creditos ?? unidadesOrden.reduce((s, u) => s + Number(u.creditos ?? 0), 0);
@@ -299,6 +322,14 @@ function pintarActa(doc: any, datos: PdfActaDatos, qrDataUrl?: string, codigo?: 
              left, y + 16 * PX);
     doc.font('Helvetica-Bold').fontSize(15 * PX).fillColor(color)
        .text(`Condición: ${cond}`, left, y + 32 * PX);
+  }
+  y += 48 * PX;   // deja pasar el bloque de resumen antes del texto extra
+  }
+
+  // ── TEXTO EXTRA (opcional, desde la config del acta) ──────
+  if (datos.texto_extra && datos.texto_extra.trim()) {
+    doc.font('Helvetica').fontSize(11 * PX).fillColor('#475569')
+       .text(datos.texto_extra.trim(), left, y + 10 * PX, { width: contentW, align: 'left' });
   }
 }
 
@@ -622,16 +653,37 @@ function pintarCertificado(doc: any, datos: PdfDatos, cuerpo: string, qrDataUrl:
         // Común a ambos modos: el acta de notas no depende del diseño del certificado.
         if (datos.acta) {
           doc.addPage({ size: 'A4', layout: 'landscape', margin: 50 });
-          // ¿La clienta puso el QR (movible) en la hoja 2? Entonces el acta NO dibuja su
-          // QR fijo: lo pinta el lienzo en la posición elegida. Si no, el acta usa el suyo.
-          const qrCampo = layout && layoutActivo(datos.layout_personalizado)
-            ? (layout.campos?.['qr'] as { on?: boolean; pagina?: number } | undefined)
-            : undefined;
-          const qrEnHoja2 = !!qrCampo && qrCampo.on !== false && (qrCampo.pagina === 2 ? 2 : 1) === 2;
-          pintarActa(doc, datos.acta, qrEnHoja2 ? undefined : qrDataUrl, datos.codigo_unico);
-          // Cositas de la HOJA 2 (logos de convenios, textos, QR movible…) SOBRE el acta.
-          if (layout && layoutActivo(datos.layout_personalizado)) {
-            pintarLienzo(doc, datos, qrDataUrl, vars, layout, { W, H, PX, imagenABuffer }, { pagina: 2, sinFondo: true });
+          const lienzoOn = layout && layoutActivo(datos.layout_personalizado);
+          // ¿El acta se arma con el lienzo (cada elemento movible/ocultable)?
+          const actaCustom = !!(lienzoOn && (layout as any).actaCustom);
+
+          if (actaCustom) {
+            // Acta 100% lienzo: NO se dibuja la acta fija. La tabla, el título, los datos
+            // y el resumen son campos del lienzo. Se pasan las variables del acta.
+            const a: any = datos.acta;
+            const condicion = (a.es_temario || a.es_creditos)
+              ? (a.aprobado ? 'APROBADO' : '')
+              : (!a.completo ? 'PENDIENTE' : a.aprobado ? 'APROBADO' : 'DESAPROBADO');
+            const varsActa: Record<string, string> = {
+              ...vars,
+              grupo:      a.nombre_grupo ?? '',
+              promedio:   a.promedio == null ? '—' : Number(a.promedio).toFixed(2),
+              condicion,
+              notaminima: Number(a.nota_minima ?? 0).toFixed(2),
+            };
+            pintarLienzo(doc, datos, qrDataUrl, varsActa, layout!, { W, H, PX, imagenABuffer }, { pagina: 2, sinFondo: true });
+          } else {
+            // ¿La clienta puso el QR (movible) en la hoja 2? Entonces el acta NO dibuja su
+            // QR fijo: lo pinta el lienzo en la posición elegida. Si no, el acta usa el suyo.
+            const qrCampo = lienzoOn
+              ? (layout!.campos?.['qr'] as { on?: boolean; pagina?: number } | undefined)
+              : undefined;
+            const qrEnHoja2 = !!qrCampo && qrCampo.on !== false && (qrCampo.pagina === 2 ? 2 : 1) === 2;
+            pintarActa(doc, datos.acta, qrEnHoja2 ? undefined : qrDataUrl, datos.codigo_unico);
+            // Cositas de la HOJA 2 (logos de convenios, textos, QR movible…) SOBRE el acta.
+            if (lienzoOn) {
+              pintarLienzo(doc, datos, qrDataUrl, vars, layout!, { W, H, PX, imagenABuffer }, { pagina: 2, sinFondo: true });
+            }
           }
         }
 }

@@ -55,6 +55,53 @@ async function ensureLayoutPersonalizado(): Promise<void> {
 }
 
 /**
+ * Auto-sana la columna `configuraciones_certificado.acta_config` (JSON con qué
+ * datos del acta se muestran, el título y un texto extra). Igual que
+ * [[ensureLayoutPersonalizado]]: la crea si la migración no corrió en prod.
+ */
+let _ensuredActaConfig = false;
+async function ensureActaConfig(): Promise<void> {
+  if (_ensuredActaConfig) return;
+  const [cols] = await pool().query<any[]>(
+    `SELECT 1 FROM information_schema.COLUMNS
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'configuraciones_certificado'
+        AND COLUMN_NAME = 'acta_config' LIMIT 1`,
+  );
+  if (!(cols as any[]).length) {
+    await pool().query(
+      `ALTER TABLE configuraciones_certificado
+         ADD COLUMN acta_config TEXT NULL AFTER layout_personalizado`,
+    );
+  }
+  _ensuredActaConfig = true;
+}
+
+/**
+ * Auto-sana la columna `requiere_notas` en `programas` (1 = lleva evaluación) y en
+ * `grupos_programas` (NULL = hereda del programa). La crea si la migración no corrió
+ * en prod → evita "Unknown column 'requiere_notas'". Igual patrón que [[ensureActaConfig]].
+ */
+let _ensuredReqNotas = false;
+async function ensureRequiereNotas(): Promise<void> {
+  if (_ensuredReqNotas) return;
+  const tieneCol = async (tabla: string): Promise<boolean> => {
+    const [c] = await pool().query<any[]>(
+      `SELECT 1 FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'requiere_notas' LIMIT 1`,
+      [tabla],
+    );
+    return (c as any[]).length > 0;
+  };
+  if (!(await tieneCol('programas'))) {
+    await pool().query(`ALTER TABLE programas ADD COLUMN requiere_notas TINYINT(1) NOT NULL DEFAULT 1`);
+  }
+  if (!(await tieneCol('grupos_programas'))) {
+    await pool().query(`ALTER TABLE grupos_programas ADD COLUMN requiere_notas TINYINT(1) NULL DEFAULT NULL`);
+  }
+  _ensuredReqNotas = true;
+}
+
+/**
  * Auto-sana la columna `empresas.layout_base` (plantilla base del "Diseño
  * personalizado / Lienzo"). Cada empresa guarda AQUÍ, una sola vez, la posición
  * por defecto de sus elementos; al activar el diseño en un programa nuevo se carga
@@ -230,6 +277,63 @@ export const calidadesRepo = {
   },
 };
 
+// ============================================================
+// GRADOS ACADÉMICOS (catálogo por empresa — chips EXTRA para TODOS los usuarios)
+// La lista base (Lic./Mag./Dr.…) vive en el frontend; esta tabla guarda SOLO los
+// grados que el centro agrega (ej. "Mg", "MBA", "Esp.") para que los vean todos.
+// ============================================================
+let _ensuredGrados = false;
+async function ensureGradosCatalogo(): Promise<void> {
+  if (_ensuredGrados) return;
+  await pool().query(
+    `CREATE TABLE IF NOT EXISTS grado_academico (
+       id INT AUTO_INCREMENT PRIMARY KEY,
+       empresa_id INT NOT NULL,
+       nombre VARCHAR(40) NOT NULL,
+       activo TINYINT(1) NOT NULL DEFAULT 1,
+       orden INT NOT NULL DEFAULT 0,
+       UNIQUE KEY uq_grado_emp_nombre (empresa_id, nombre)
+     )`,
+  );
+  _ensuredGrados = true;
+}
+
+export const gradosRepo = {
+  async list(tenantSlug: string, incluirInactivos = false) {
+    await ensureGradosCatalogo();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const [rows] = await pool().query<any[]>(
+      `SELECT id, nombre, activo, orden FROM grado_academico
+        WHERE empresa_id = ?${incluirInactivos ? '' : ' AND activo = 1'}
+        ORDER BY orden, nombre`,
+      [empresaId],
+    );
+    return rows;
+  },
+
+  async create(tenantSlug: string, nombre: string) {
+    await ensureGradosCatalogo();
+    const empresaId = await getEmpresaId(tenantSlug);
+    const nom = String(nombre ?? '').trim();
+    if (!nom) throw new Error('El nombre del grado es requerido.');
+    const [[{ maxOrden }]] = await pool().query<any[]>(
+      'SELECT COALESCE(MAX(orden), 0) AS maxOrden FROM grado_academico WHERE empresa_id = ?', [empresaId],
+    ) as any;
+    // Idempotente: si ya existe (mismo nombre) la reactiva en vez de duplicar.
+    await pool().query(
+      `INSERT INTO grado_academico (empresa_id, nombre, orden)
+       VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE activo = 1`,
+      [empresaId, nom, Number(maxOrden) + 1],
+    );
+    const [rows] = await pool().query<any[]>(
+      'SELECT id, nombre, activo, orden FROM grado_academico WHERE empresa_id = ? AND nombre = ? LIMIT 1',
+      [empresaId, nom],
+    );
+    return rows[0];
+  },
+};
+
 /** Se lanza cuando no se puede BORRAR algo por datos asociados. El controller la mapea a 409.
  *  (Hoy el borrado arrastra los certificados, así que normalmente no se usa; queda como
  *  red de seguridad para errores de integridad inesperados.) */
@@ -309,11 +413,12 @@ export const programasRepo = {
 
   async create(tenantSlug: string, dto: CreateProgramaDto, userId?: number): Promise<ProgramaEntity> {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureRequiereNotas();   // crea la columna si la migración no corrió en prod
     const [result] = await pool().query<any>(
-      `INSERT INTO programas (empresa_id, tipo_programa_id, nombre, descripcion, horas_academicas, creditos, unidad_label, nota_minima, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO programas (empresa_id, tipo_programa_id, nombre, descripcion, horas_academicas, creditos, unidad_label, nota_minima, requiere_notas, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [empresaId, dto.tipo_programa_id, dto.nombre, dto.descripcion ?? null, dto.horas_academicas, dto.creditos ?? 0,
-       dto.unidad_label || 'Unidad', dto.nota_minima ?? 11, userId ?? null],
+       dto.unidad_label || 'Unidad', dto.nota_minima ?? 11, dto.requiere_notas === undefined ? 1 : (dto.requiere_notas ? 1 : 0), userId ?? null],
     );
     const prog = (await programasRepo.findById(tenantSlug, result.insertId))!;
     auditoriaRepo.registrar({
@@ -325,6 +430,7 @@ export const programasRepo = {
 
   async update(tenantSlug: string, id: number, dto: UpdateProgramaDto, userId?: number): Promise<ProgramaEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureRequiereNotas();   // crea la columna si la migración no corrió en prod
     const antes = await programasRepo.findById(tenantSlug, id);
     const fields: string[] = [];
     const values: any[]    = [];
@@ -335,6 +441,7 @@ export const programasRepo = {
     if (dto.tipo_programa_id !== undefined) { fields.push('tipo_programa_id = ?'); values.push(dto.tipo_programa_id); }
     if (dto.unidad_label     !== undefined) { fields.push('unidad_label = ?');     values.push(dto.unidad_label || 'Unidad'); }
     if (dto.nota_minima      !== undefined) { fields.push('nota_minima = ?');       values.push(dto.nota_minima); }
+    if (dto.requiere_notas   !== undefined) { fields.push('requiere_notas = ?');    values.push(dto.requiere_notas ? 1 : 0); }
     if (fields.length) {
       fields.push('user_actua_id = ?'); values.push(userId ?? null, id, empresaId);
       await pool().query(`UPDATE programas SET ${fields.join(', ')} WHERE id = ? AND empresa_id = ?`, values);
@@ -349,6 +456,7 @@ export const programasRepo = {
         { key: 'tipo_programa_id', label: 'tipo' },
         { key: 'unidad_label', label: 'rótulo de unidad' },
         { key: 'nota_minima', label: 'nota mínima' },
+        { key: 'requiere_notas', label: 'evaluación' },
       ]);
       if (texto) auditoriaRepo.registrar({
         empresaId, usuarioId: userId, accion: 'editar', entidad: 'programa', entidadId: id, entidadNombre: despues.nombre,
@@ -510,7 +618,8 @@ export const esModoCreditos = (unidadLabel?: string | null): boolean =>
 /** Recalcula el estado de la inscripción según el promedio simple de sus notas. */
 async function recomputarEstadoInscripcion(empresaId: number, inscripcionId: number, userId?: number): Promise<void> {
   const [pr] = await pool().query<any[]>(
-    `SELECT prog.id AS programa_id, prog.nota_minima, prog.unidad_label, i.estado_id
+    `SELECT prog.id AS programa_id, prog.nota_minima, prog.unidad_label, i.estado_id,
+            COALESCE(g.requiere_notas, prog.requiere_notas) AS requiere_notas
      FROM inscripciones i
      JOIN grupos_programas g ON g.id = i.grupo_id
      JOIN programas prog     ON prog.id = g.programa_id
@@ -519,6 +628,8 @@ async function recomputarEstadoInscripcion(empresaId: number, inscripcionId: num
   );
   if (!pr[0]) return;
   const { programa_id, nota_minima, unidad_label, estado_id } = pr[0];
+  // Aula/programa sin evaluación: la aprobación es manual (por asistencia), no por notas.
+  if (Number(pr[0].requiere_notas ?? 1) === 0) return;
   // Modo créditos: no hay notas, la aprobación es manual (por asistencia).
   if (esModoCreditos(unidad_label)) return;
   // No tocar RETIRADO (5) ni RECHAZADO (6).
@@ -561,10 +672,12 @@ export const notasRepo = {
   /** Matriz de notas de un grupo: unidades del programa + una fila por alumno. */
   async matrizGrupo(tenantSlug: string, grupoId: number) {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureRequiereNotas();
 
     const [gr] = await pool().query<any[]>(
       `SELECT g.id, g.nombre_grupo, prog.id AS programa_id, prog.nombre AS programa_nombre,
-              prog.unidad_label, prog.nota_minima
+              prog.unidad_label, prog.nota_minima,
+              COALESCE(g.requiere_notas, prog.requiere_notas) AS requiere_notas
        FROM grupos_programas g
        JOIN programas prog ON prog.id = g.programa_id
        WHERE g.id = ? AND g.empresa_id = ?`,
@@ -624,6 +737,7 @@ export const notasRepo = {
       programa_nombre: programa.programa_nombre,
       unidad_label:    programa.unidad_label,
       es_creditos:     esModoCreditos(programa.unidad_label),
+      requiere_notas:  Number(programa.requiere_notas ?? 1),
       nota_minima:     notaMinima,
       unidades:        unidades.map(u => ({ id: u.id, nombre: u.nombre, orden: u.orden, creditos: Number(u.creditos) })),
       filas,
@@ -633,6 +747,7 @@ export const notasRepo = {
   /** Guarda (upsert) las notas de un alumno y recalcula su estado. */
   async guardarNotas(tenantSlug: string, inscripcionId: number, notas: NotaInput[], userId?: number) {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureRequiereNotas();
 
     for (const n of notas) {
       await pool().query(
@@ -678,12 +793,14 @@ export const notasRepo = {
   /** Datos completos para el acta de notas de un alumno. */
   async actaData(tenantSlug: string, inscripcionId: number) {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureRequiereNotas();
     const [rows] = await pool().query<any[]>(
       `SELECT i.id AS inscripcion_id, i.empresa_id, i.estado_id, ei.nombre AS estado_nombre,
               CONCAT(CASE WHEN p.grados IS NOT NULL AND TRIM(p.grados) <> '' THEN CONCAT(REPLACE(p.grados,',',' '),' ') ELSE '' END, p.nombres,' ',p.apellidos) AS participante_nombre, p.numero_documento,
               g.nombre_grupo, g.fecha_inicio, g.fecha_fin, g.fecha_dia2, g.fecha_dia3,
               prog.id AS programa_id, prog.nombre AS programa_nombre,
               prog.unidad_label, prog.nota_minima, prog.horas_academicas,
+              COALESCE(g.requiere_notas, prog.requiere_notas) AS requiere_notas,
               e.razon_social AS empresa_nombre, e.tenant_slug
        FROM inscripciones i
        JOIN participantes p       ON p.id = i.participante_id
@@ -710,6 +827,8 @@ export const notasRepo = {
     return {
       ...info,
       es_creditos: modoCreditos,
+      es_temario: Number(info.requiere_notas ?? 1) === 0 && !modoCreditos,
+      requiere_notas: Number(info.requiere_notas ?? 1),
       nota_minima: Number(info.nota_minima),
       total_creditos: unidades.reduce((s, u) => s + Number(u.creditos), 0),
       unidades: unidades.map(u => ({
@@ -819,13 +938,14 @@ export const gruposRepo = {
 
   async create(tenantSlug: string, dto: CreateGrupoDto, userId?: number): Promise<GrupoEntity> {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureRequiereNotas();   // crea la columna si la migración no corrió en prod
     const [result] = await pool().query<any>(
-      `INSERT INTO grupos_programas (empresa_id, programa_id, nombre_grupo, fecha_inicio, fecha_fin, fecha_dia2, fecha_dia3, dias_semana, hora_inicio, hora_fin, modalidad_id, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO grupos_programas (empresa_id, programa_id, nombre_grupo, fecha_inicio, fecha_fin, fecha_dia2, fecha_dia3, dias_semana, hora_inicio, hora_fin, modalidad_id, requiere_notas, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [empresaId, dto.programa_id, dto.nombre_grupo, dto.fecha_inicio, dto.fecha_fin ?? null,
        dto.fecha_dia2 ?? null, dto.fecha_dia3 ?? null,
        dto.dias_semana ?? null, dto.hora_inicio ?? null, dto.hora_fin ?? null,
-       dto.modalidad_id, userId ?? null],
+       dto.modalidad_id, dto.requiere_notas == null ? null : (dto.requiere_notas ? 1 : 0), userId ?? null],
     );
     const grupo = (await gruposRepo.findById(tenantSlug, result.insertId))!;
     auditoriaRepo.registrar({
@@ -841,15 +961,17 @@ export const gruposRepo = {
     // aunque la fila exista, así que no podemos usar eso para el 404.
     const existe = await gruposRepo.findById(tenantSlug, id);
     if (!existe) return null;
+    await ensureRequiereNotas();   // crea la columna si la migración no corrió en prod
     await pool().query<any>(
       `UPDATE grupos_programas
           SET programa_id = ?, nombre_grupo = ?, fecha_inicio = ?, fecha_fin = ?,
               fecha_dia2 = ?, fecha_dia3 = ?,
-              dias_semana = ?, hora_inicio = ?, hora_fin = ?, modalidad_id = ?
+              dias_semana = ?, hora_inicio = ?, hora_fin = ?, modalidad_id = ?, requiere_notas = ?
         WHERE id = ? AND empresa_id = ?`,
       [dto.programa_id, dto.nombre_grupo, dto.fecha_inicio, dto.fecha_fin ?? null,
        dto.fecha_dia2 ?? null, dto.fecha_dia3 ?? null,
        dto.dias_semana ?? null, dto.hora_inicio ?? null, dto.hora_fin ?? null, dto.modalidad_id,
+       dto.requiere_notas == null ? null : (dto.requiere_notas ? 1 : 0),
        id, empresaId],
     );
     const grupo = (await gruposRepo.findById(tenantSlug, id))!;
@@ -1250,6 +1372,7 @@ export const inscripcionesRepo = {
 
   async cambiarEstado(tenantSlug: string, id: number, estadoId: number, userId?: number): Promise<InscripcionEntity | null> {
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureRequiereNotas();
 
     // Aprobado(3)/Desaprobado(4) NO se pueden poner a mano si el programa tiene unidades:
     // esa decisión la define el promedio de notas. Para programas sin unidades, sí es manual.
@@ -1260,7 +1383,7 @@ export const inscripcionesRepo = {
          JOIN programas prog     ON prog.id = un.programa_id
          JOIN grupos_programas g ON g.programa_id = un.programa_id
          JOIN inscripciones i    ON i.grupo_id = g.id
-         WHERE i.id = ? AND i.empresa_id = ? AND un.activo = 1 AND prog.unidad_label <> ?`,
+         WHERE i.id = ? AND i.empresa_id = ? AND un.activo = 1 AND prog.unidad_label <> ? AND COALESCE(g.requiere_notas, prog.requiere_notas) = 1`,
         [id, empresaId, LABEL_CREDITOS],
       );
       if (Number((u as any[])[0]?.total ?? 0) > 0) {
@@ -1337,6 +1460,7 @@ export const inscripcionesRepo = {
     if (!idsLimpios.length) return 0;
 
     const empresaId = await getEmpresaId(tenantSlug);
+    await ensureRequiereNotas();
     const placeholders = idsLimpios.map(() => '?').join(',');
 
     if (estadoId === 3 || estadoId === 4) {
@@ -1346,7 +1470,7 @@ export const inscripcionesRepo = {
          JOIN programas prog     ON prog.id = un.programa_id
          JOIN grupos_programas g ON g.programa_id = un.programa_id
          JOIN inscripciones i    ON i.grupo_id = g.id
-         WHERE i.id IN (${placeholders}) AND i.empresa_id = ? AND un.activo = 1 AND prog.unidad_label <> ?`,
+         WHERE i.id IN (${placeholders}) AND i.empresa_id = ? AND un.activo = 1 AND prog.unidad_label <> ? AND COALESCE(g.requiere_notas, prog.requiere_notas) = 1`,
         [...idsLimpios, empresaId, LABEL_CREDITOS],
       );
       if (Number((u as any[])[0]?.total ?? 0) > 0) {
@@ -1666,19 +1790,21 @@ export const configRepo = {
 
   async upsert(tenantSlug: string, programaId: number, dto: UpsertConfigDto, userId?: number): Promise<ConfigCertificadoEntity> {
     await ensureLayoutPersonalizado();   // crea la columna si la migración no corrió en prod
+    await ensureActaConfig();            // idem para la config del acta
     const empresaId = await getEmpresaId(tenantSlug);
     const grupoId = dto.grupo_id ?? 0;
 
     await pool().query(
       `INSERT INTO configuraciones_certificado
-         (empresa_id, programa_id, grupo_id, plantilla_url, texto_personalizado, layout_personalizado, user_crea_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+         (empresa_id, programa_id, grupo_id, plantilla_url, texto_personalizado, layout_personalizado, acta_config, user_crea_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE
          plantilla_url        = VALUES(plantilla_url),
          texto_personalizado  = VALUES(texto_personalizado),
          layout_personalizado = VALUES(layout_personalizado),
+         acta_config          = VALUES(acta_config),
          user_actua_id        = ?`,
-      [empresaId, programaId, grupoId, guardarImagen(dto.plantilla_url, 'plantillas') ?? null, dto.texto_personalizado ?? null, dto.layout_personalizado ?? null, userId ?? null, userId ?? null],
+      [empresaId, programaId, grupoId, guardarImagen(dto.plantilla_url, 'plantillas') ?? null, dto.texto_personalizado ?? null, dto.layout_personalizado ?? null, dto.acta_config ?? null, userId ?? null, userId ?? null],
     );
 
     const [rows] = await pool().query<any[]>(
@@ -1739,6 +1865,7 @@ export const configRepo = {
       plantilla_url:      base.plantilla_url,
       texto_personalizado: (base as any).texto_personalizado ?? null,
       layout_personalizado: (base as any).layout_personalizado ?? null,
+      acta_config:        (base as any).acta_config ?? null,
       logo_ids:           base.logos.map(l => l.id),
       firma_ids:          base.firmas.map(f => f.id),
     }, userId);
@@ -2374,6 +2501,8 @@ async function construirPdfDatos(cert: any, tenantSlug: string): Promise<PdfDato
 let acta: any = null;
 if (cert.inscripcion_id) {
   const ad: any = await notasRepo.actaData(tenantSlug, cert.inscripcion_id);
+  // Con unidades siempre hay acta. Si el programa NO lleva evaluación (requiere_notas = 0)
+  // y no es por créditos, el acta sale como TEMARIO (lista de temas, sin notas ni promedio).
   if (ad && ad.unidades.length > 0) {
     acta = {
       inscripcion_id:      ad.inscripcion_id,
@@ -2383,6 +2512,7 @@ if (cert.inscripcion_id) {
       nombre_grupo:        ad.nombre_grupo,
       unidad_label:        ad.unidad_label,
       es_creditos:         ad.es_creditos,
+      es_temario:          Number(ad.requiere_notas ?? 1) === 0 && !ad.es_creditos,
       total_creditos:      ad.total_creditos,
       nota_minima:         Number(ad.nota_minima),
       fecha_inicio:        fechaInicio,
@@ -2411,11 +2541,21 @@ if (!acta && cert.programa_id) {
 
   if (unidades.length > 0) {
     const [progRows] = await pool().query<any[]>(
-      `SELECT nombre, unidad_label, nota_minima FROM programas WHERE id = ?`,
+      `SELECT nombre, unidad_label, nota_minima, requiere_notas FROM programas WHERE id = ?`,
       [cert.programa_id],
     );
     const prog = (progRows as any[])[0];
     const esCreditos = (prog?.unidad_label ?? '').trim() === 'Crédito';
+    // Override por aula: si el aula fija requiere_notas, manda sobre el del programa.
+    let rnEfectivo = Number(prog?.requiere_notas ?? 1);
+    if (cert.inscripcion_id) {
+      const [gRows] = await pool().query<any[]>(
+        `SELECT g.requiere_notas AS rn FROM grupos_programas g JOIN inscripciones i ON i.grupo_id = g.id WHERE i.id = ?`,
+        [cert.inscripcion_id],
+      );
+      if (gRows[0] && gRows[0].rn != null) rnEfectivo = Number(gRows[0].rn);
+    }
+    const sinEvaluacion = rnEfectivo === 0;
 
     // Notas reales si existen para esta inscripción
     const notasMap = new Map<number, number | null>();
@@ -2441,6 +2581,7 @@ if (!acta && cert.programa_id) {
       nombre_grupo:        cert.nombre_grupo ?? '—',
       unidad_label:        prog?.unidad_label ?? 'Unidad',
       es_creditos:         esCreditos,
+      es_temario:          sinEvaluacion && !esCreditos,
       total_creditos:      unidades.reduce((s, u) => s + Number(u.creditos ?? 0), 0),
       nota_minima:         Number(prog?.nota_minima ?? 11),
       fecha_inicio:        fechaInicio,
@@ -2457,6 +2598,18 @@ if (!acta && cert.programa_id) {
     };
   }
 }
+
+    // Config del acta (qué datos muestra, título propio y texto extra) — por programa/grupo.
+    if (acta) {
+      let ac: any = {};
+      try { ac = (config as any)?.acta_config ? JSON.parse((config as any).acta_config) : {}; } catch { ac = {}; }
+      acta.titulo_override   = typeof ac.titulo === 'string' && ac.titulo.trim() ? ac.titulo.trim() : null;
+      acta.mostrar_documento = ac.mostrarDocumento !== false;   // default: mostrar
+      acta.mostrar_grupo     = ac.mostrarGrupo     !== false;
+      acta.mostrar_periodo   = ac.mostrarPeriodo   !== false;
+      acta.mostrar_qr        = ac.mostrarQr        !== false;
+      acta.texto_extra       = typeof ac.textoExtra === 'string' && ac.textoExtra.trim() ? ac.textoExtra.trim() : null;
+    }
 
     // Logos del cert. Logo DEFAULT obligatorio (planes Básico/Profesional): el
     // logo de la empresa (logo_url) SIEMPRE aparece, aunque la config no lo tenga

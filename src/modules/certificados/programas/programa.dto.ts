@@ -9,6 +9,8 @@ export interface CreateProgramaDto {
   unidad_label?: string;
   /** Nota mínima de aprobación (escala 0-20). Default 11. */
   nota_minima?: number;
+  /** 1 = lleva evaluación (notas + acta). 0 = sin evaluación (solo certificado). Default 1. */
+  requiere_notas?: number;
 }
 
 export type UpdateProgramaDto = Partial<CreateProgramaDto>;

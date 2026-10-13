@@ -95,9 +95,26 @@ export interface CampoLinea {
   sigueA?:    string;
 }
 
+/** Tabla del acta (notas / temario / créditos) como elemento movible del lienzo.
+ *  Los datos salen de `datos.acta`; aquí solo se posiciona. */
+export interface CampoActaTabla {
+  on?:     boolean;
+  x?:      number;
+  y?:      number;
+  w?:      number;
+  size?:   number;
+  color?:  string;
+  /** Títulos editables de la cabecera (vacío = automático). */
+  hNum?:   string;
+  hUni?:   string;
+  hVal?:   string;
+}
+
 export interface LayoutLienzo {
   activo?: boolean;
-  /** Campos por clave. La clave `qr` es el QR; el resto son campos de texto. */
+  /** true si el acta (hoja 2) se arma con el lienzo en vez de la plantilla fija. */
+  actaCustom?: boolean;
+  /** Campos por clave. La clave `qr` es el QR; `actatabla` la tabla; el resto, textos. */
   campos?: Record<string, CampoTexto | CampoQR>;
 }
 
@@ -509,6 +526,54 @@ export function pintarLienzo(
       }
       doc.moveTo(lx, ly).lineTo(lx + lw, ly)
         .lineWidth((c.thickness ?? 1.5) * PX).strokeColor(c.color ?? '#c9a24b').stroke();
+      continue;
+    }
+
+    // TABLA DEL ACTA (notas / temario / créditos) — datos reales de datos.acta
+    if (key === 'actatabla') {
+      const c = raw as CampoActaTabla;
+      const acta: any = (datos as any).acta;
+      if (!acta) continue;
+      const x = (c.x ?? 60) * PX, y = (c.y ?? 210) * PX, w = (c.w ?? 1002) * PX;
+      const size = (c.size ?? 13) * PX;
+      const NAVY = '#12294d';
+      const esTemario = !!acta.es_temario;
+      const esCreditos = !!acta.es_creditos;
+      const colNum = 60 * PX, colValor = esTemario ? 0 : 140 * PX, colUni = w - colNum - colValor;
+      const rowH = 24;
+      // Header
+      doc.rect(x, y, w, rowH).fill(NAVY);
+      doc.fillColor('#ffffff').font(fontFor(true, false, 'sans', reg)).fontSize(12 * PX);
+      const hNum = (c.hNum ?? '').trim() || 'N°';
+      const hUni = (c.hUni ?? '').trim() || (esCreditos ? 'TEMA' : String(acta.unidad_label ?? 'Unidad').toUpperCase());
+      const hVal = (c.hVal ?? '').trim() || (esCreditos ? 'CRÉDITOS' : 'NOTA');
+      doc.text(hNum, x + 14 * PX, y + 7, { width: colNum });
+      doc.text(hUni, x + colNum + 14 * PX, y + 7, { width: colUni - 28 * PX });
+      if (!esTemario) {
+        doc.text(hVal, x + colNum + colUni, y + 7, { width: colValor - 14 * PX, align: 'right' });
+      }
+      let yy = y + rowH;
+      const unidades = [...(acta.unidades ?? [])].sort((a: any, b: any) => (a.orden ?? 0) - (b.orden ?? 0));
+      for (let i = 0; i < unidades.length; i++) {
+        const u: any = unidades[i];
+        const nombre = u.nombre ?? '';
+        doc.font(fontFor(false, false, 'sans', reg)).fontSize(size);
+        const nh = doc.heightOfString(nombre, { width: colUni - 28 * PX });
+        const rh = Math.max(24, nh + 12 * PX);
+        doc.rect(x, yy, w, rh).fill(i % 2 === 0 ? '#ffffff' : '#f6f8fb');
+        doc.fillColor('#2563eb').font(fontFor(true, false, 'sans', reg)).fontSize(size)
+          .text(String(i + 1), x + 14 * PX, yy + 7 * PX, { width: colNum });
+        doc.fillColor(c.color ?? '#0f172a').font(fontFor(false, false, 'sans', reg)).fontSize(size)
+          .text(nombre, x + colNum + 14 * PX, yy + 7 * PX, { width: colUni - 28 * PX });
+        if (!esTemario) {
+          const valor = esCreditos
+            ? String(Number(u.creditos ?? 0))
+            : (u.nota == null ? '—' : Number(u.nota).toFixed(2));
+          doc.font(fontFor(true, false, 'sans', reg)).fillColor(c.color ?? '#0f172a').fontSize(size)
+            .text(valor, x + colNum + colUni, yy + 7 * PX, { width: colValor - 14 * PX, align: 'right' });
+        }
+        yy += rh;
+      }
       continue;
     }
 

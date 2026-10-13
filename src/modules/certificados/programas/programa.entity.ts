@@ -9,6 +9,8 @@ export class ProgramaEntity {
   creditos!: number;
   unidad_label!: string;
   nota_minima!: number;
+  /** 1 = lleva evaluación (notas + acta). 0 = sin evaluación (solo certificado). */
+  requiere_notas!: number;
   activo!: boolean;
   created_at!: string;
   updated_at?: string;
